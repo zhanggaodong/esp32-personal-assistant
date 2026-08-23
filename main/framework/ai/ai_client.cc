@@ -81,7 +81,6 @@ esp_err_t PerformPost(const std::string& url,
     }
 
     out.status = esp_http_client_fetch_headers(client);
-    esp_http_client_get_status_code(client, &out.status);
 
     char buf[1024];
     int total = 0;
@@ -321,7 +320,6 @@ bool AiClient::Chat(const std::string& text, const OnDeltaFn& on_delta,
     }
 
     int status = esp_http_client_fetch_headers(client);
-    esp_http_client_get_status_code(client, &status);
     if (status == 401) {
         InvalidateToken();
         esp_http_client_close(client);
@@ -416,7 +414,6 @@ bool AiClient::Synthesize(const std::string& text, const OnAudioPcmFn& on_pcm) {
     }
 
     int status = esp_http_client_fetch_headers(client);
-    esp_http_client_get_status_code(client, &status);
     if (status == 401) {
         InvalidateToken();
         esp_http_client_close(client);
