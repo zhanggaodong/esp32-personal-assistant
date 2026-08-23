@@ -17,10 +17,10 @@ public:
     void onHide() override;
     void onStop() override;
     void onConfigChanged(const char* key) override;
+    void RefreshClock();     // 刷新时间/日期文本（供定时器回调调用，仅更新 label）
 
 private:
     void Rebuild();          // 依据配置重建背景/文字
-    void RefreshClock();     // 刷新时间/日期文本（供定时器每秒调用，仅更新 label）
     void LoadBackground();   // 释放旧的背景解码缓冲
 
     AppMetadata metadata_;
