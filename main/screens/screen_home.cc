@@ -211,9 +211,9 @@ void ScreenHome::onHide() {
     }
     DisplayLockGuard lock(display);
     // 隐藏本屏 LVGL 对象，避免叠加在其他屏之上
-    if (wallpaper_img_ != nullptr) lv_obj_add_flag(wallpaper_img_, LV_OBJ_FLAG_HIDDEN);
-    if (title_label_ != nullptr) lv_obj_add_flag(title_label_, LV_OBJ_FLAG_HIDDEN);
-    if (subtitle_label_ != nullptr) lv_obj_add_flag(subtitle_label_, LV_OBJ_FLAG_HIDDEN);
+    if (wallpaper_img_ != nullptr) lv_obj_add_flag(static_cast<lv_obj_t*>(wallpaper_img_), LV_OBJ_FLAG_HIDDEN);
+    if (title_label_ != nullptr) lv_obj_add_flag(static_cast<lv_obj_t*>(title_label_), LV_OBJ_FLAG_HIDDEN);
+    if (subtitle_label_ != nullptr) lv_obj_add_flag(static_cast<lv_obj_t*>(subtitle_label_), LV_OBJ_FLAG_HIDDEN);
 }
 
 void ScreenHome::onStop() {
@@ -222,9 +222,9 @@ void ScreenHome::onStop() {
         return;
     }
     DisplayLockGuard lock(display);
-    if (wallpaper_img_ != nullptr) { lv_obj_delete(wallpaper_img_); wallpaper_img_ = nullptr; }
-    if (title_label_ != nullptr) { lv_obj_delete(title_label_); title_label_ = nullptr; }
-    if (subtitle_label_ != nullptr) { lv_obj_delete(subtitle_label_); subtitle_label_ = nullptr; }
+    if (wallpaper_img_ != nullptr) { lv_obj_delete(static_cast<lv_obj_t*>(wallpaper_img_)); wallpaper_img_ = nullptr; }
+    if (title_label_ != nullptr) { lv_obj_delete(static_cast<lv_obj_t*>(title_label_)); title_label_ = nullptr; }
+    if (subtitle_label_ != nullptr) { lv_obj_delete(static_cast<lv_obj_t*>(subtitle_label_)); subtitle_label_ = nullptr; }
     LoadWallpaper();
     ESP_LOGI(TAG, "Home screen stopped");
 }

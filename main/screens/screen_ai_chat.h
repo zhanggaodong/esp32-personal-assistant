@@ -6,6 +6,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <lvgl.h>
 
 #include "framework/app/base_app.h"
 
@@ -55,8 +56,8 @@ private:
     std::atomic_bool listening_{false};   // 正在采集麦克风
 
     // LVGL 对象
-    void* title_label_ = nullptr;
-    void* status_label_ = nullptr;
-    void* scroll_cont_ = nullptr;
-    void* text_label_ = nullptr;
+    lv_obj_t* title_label_ = nullptr;
+    lv_obj_t* status_label_ = nullptr;
+    lv_obj_t* scroll_cont_ = nullptr;
+    lv_obj_t* text_label_ = nullptr;
 };
