@@ -8,6 +8,7 @@
 #include "app_registry.h"
 #include "board.h"
 #include "config/config_store.h"
+#include "display.h"
 
 #define TAG "AppManager"
 
