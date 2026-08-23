@@ -17,8 +17,8 @@
 
 namespace {
 
-void SendJson(httpd_req_t* req, const std::string& body, int status = HTTPD_200) {
-    httpd_resp_set_status(req, status == HTTPD_200 ? HTTPD_200 : HTTPD_400);
+void SendJson(httpd_req_t* req, const std::string& body, const char* status = HTTPD_200) {
+    httpd_resp_set_status(req, status);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_send(req, body.c_str(), body.length());
@@ -114,10 +114,14 @@ esp_err_t HandleGetStatus(httpd_req_t* req) {
 
 // 解析 /api/upload?name=xxx.jpg 中的文件名参数
 bool GetQueryName(httpd_req_t* req, std::string& name) {
-    if (req->query_string == nullptr) {
+    size_t len = httpd_req_get_url_query_len(req);
+    if (len == 0) {
         return false;
     }
-    std::string q = req->query_string;
+    std::string q(len + 1, '\0');
+    if (httpd_req_get_url_query_str(req, &q[0], len + 1) != ESP_OK) {
+        return false;
+    }
     size_t pos = 0;
     while (pos < q.size()) {
         size_t eq = q.find('=', pos);
