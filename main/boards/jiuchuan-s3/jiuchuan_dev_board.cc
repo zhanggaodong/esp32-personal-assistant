@@ -21,6 +21,10 @@
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
 
+#ifdef CONFIG_APP_MODE_FRAMEWORK
+#include "input/input_router.h"
+#endif
+
 #define BOARD_TAG "JiuchuanDevBoard"
 #define __USER_GPIO_PWRDOWN__
 
@@ -179,6 +183,10 @@ private:
         });
         pwr_button_.OnLongPress([this]()
                                 {
+#ifdef CONFIG_APP_MODE_FRAMEWORK
+        // 框架模式：电源键长按 → 按网页配置路由（默认回主页）
+        InputRouter::Instance().HandleKeyEvent("power", "long");
+#else
         ESP_LOGI(TAG, "Power button long press detected (high-active)");
 
             if (pwrbutton_unreleased){
@@ -199,11 +207,17 @@ private:
             }
             
             ESP_LOGI(TAG, "Confirmed power button pressed - initiating shutdown");
-            power_manager_->SetPowerState(PowerState::SHUTDOWN); });
+            power_manager_->SetPowerState(PowerState::SHUTDOWN);
+#endif
+            });
 
         //单击切换状态
         pwr_button_.OnClick([this]()
                             {
+#ifdef CONFIG_APP_MODE_FRAMEWORK
+            // 框架模式：电源键单击 → 按网页配置路由（默认显示菜单）
+            InputRouter::Instance().HandleKeyEvent("power", "click");
+#else
             // 获取当前应用实例和状态
             auto &app = Application::GetInstance();
             auto current_state = app.GetDeviceState();
@@ -226,7 +240,9 @@ private:
                 // 其他状态下只唤醒设备
                 ESP_LOGI(TAG, "唤醒设备");
                 power_save_timer_->WakeUp();
-            } });
+            }
+#endif
+            });
 
         // 电源键三击：重置WiFi
         pwr_button_.OnMultipleClick([this]() {
@@ -237,6 +253,9 @@ private:
 
         wifi_button.OnPressDown([this]()
                             {
+#ifdef CONFIG_APP_MODE_FRAMEWORK
+           InputRouter::Instance().HandleKeyEvent("vol_up", "click");
+#else
            ESP_LOGI(TAG, "Volume up button pressed");
             power_save_timer_->WakeUp();
 
@@ -248,10 +267,15 @@ private:
 
             ESP_LOGI(TAG, "Current volume: %d", current_vol);
             int display_volume = MapVolumeForDisplay(current_vol);
-            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(display_volume) + "%");});
+            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(display_volume) + "%");
+#endif
+            });
 
         cmd_button.OnPressDown([this]()
                            {
+#ifdef CONFIG_APP_MODE_FRAMEWORK
+           InputRouter::Instance().HandleKeyEvent("vol_down", "click");
+#else
            ESP_LOGI(TAG, "Volume down button pressed");
             power_save_timer_->WakeUp();
 
@@ -267,7 +291,9 @@ private:
             } else {
                 int display_volume = MapVolumeForDisplay(current_vol);
                 GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(display_volume) + "%");
-            }});
+            }
+#endif
+            });
     }
 
         void InitializeGC9301isplay()

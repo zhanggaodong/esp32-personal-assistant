@@ -6,6 +6,21 @@ config OTA_URL
     help
         The application will access this URL to check for new firmwares and server address.
 
+choice APP_MODE
+    prompt "Application Mode"
+    default APP_MODE_XIAOZHI
+    help
+        Select the application run mode.
+        Xiaozhi Assistant: 原始小智 AI 语音助手。
+        Personal Assistant Framework: 可扩展桌面助手框架（AI 对话为可选模块）。
+
+    config APP_MODE_XIAOZHI
+        bool "Xiaozhi Assistant (original)"
+
+    config APP_MODE_FRAMEWORK
+        bool "Personal Assistant Framework"
+endchoice
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS

@@ -28,6 +28,17 @@ set(SOURCES "audio/audio_codec.cc"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
+            "framework/app/app_registry.cc"
+            "framework/app/app_manager.cc"
+            "framework/event_bus.cc"
+            "framework/framework_main.cc"
+            "framework/config/config_schema.cc"
+            "framework/config/config_store.cc"
+            "framework/input/input_router.cc"
+            "framework/web/web_server.cc"
+            "framework/web/web_config_api.cc"
+            "screens/screen_home.cc"
+            "screens/screen_settings.cc"
             "mcp_server.cc"
             "system_info.cc"
             "application.cc"
@@ -38,7 +49,7 @@ set(SOURCES "audio/audio_codec.cc"
             "main.cc"
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "protocols")
+set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "protocols" "framework")
 
 # Add board common files
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)

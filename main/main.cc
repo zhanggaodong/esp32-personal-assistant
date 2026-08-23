@@ -10,6 +10,10 @@
 #include "application.h"
 #include "system_info.h"
 
+#ifdef CONFIG_APP_MODE_FRAMEWORK
+#include "framework/framework_main.h"
+#endif
+
 #define TAG "main"
 
 extern "C" void app_main(void)
@@ -23,8 +27,14 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+#ifdef CONFIG_APP_MODE_FRAMEWORK
+    // Personal Assistant Framework 独立入口
+    framework_main();
+#else
+    // 原始小智 AI 语音助手
     // Initialize and run the application
     auto& app = Application::GetInstance();
     app.Initialize();
     app.Run();  // This function runs the main event loop and never returns
+#endif
 }
