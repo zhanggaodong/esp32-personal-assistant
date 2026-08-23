@@ -3,6 +3,7 @@
 #include <esp_log.h>
 
 #include "board.h"
+#include "display/display.h"
 
 #define TAG "ScreenSettings"
 
