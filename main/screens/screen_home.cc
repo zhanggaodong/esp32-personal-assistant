@@ -7,6 +7,8 @@
 
 #include <lvgl.h>
 
+LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
+
 #include "board.h"
 #include "display/display.h"
 #include "config/config_store.h"
@@ -41,7 +43,7 @@ static lv_color_t ParseColor(const std::string& s, uint8_t fallback_r, uint8_t f
 // 从 LittleFS 读取并解码壁纸到 wallpaper_buf_/wallpaper_dsc_
 // 返回是否成功解码出壁纸
 bool TryDecodeWallpaper(const std::string& file, uint8_t** out_buf, size_t* out_len,
-                        int* out_w, int* out_h, void** out_dsc) {
+                        int* out_w, int* out_h, lv_img_dsc_t** out_dsc) {
     std::vector<uint8_t> raw;
     if (file.empty() || !LittleFsStore::ReadFile(file.c_str(), raw) || raw.empty()) {
         return false;
@@ -86,7 +88,7 @@ const AppMetadata& ScreenHome::metadata() {
 void ScreenHome::LoadWallpaper() {
     // 释放上一份壁纸缓冲与 dsc（新壁纸解码前调用）
     if (wallpaper_dsc_ != nullptr) {
-        delete static_cast<lv_img_dsc_t*>(wallpaper_dsc_);
+        delete wallpaper_dsc_;
         wallpaper_dsc_ = nullptr;
     }
     if (wallpaper_buf_ != nullptr) {
@@ -127,8 +129,12 @@ void ScreenHome::Rebuild() {
             if (TryDecodeWallpaper(wp_file, &wallpaper_buf_, &len, &wallpaper_w_, &wallpaper_h_, &wallpaper_dsc_)) {
                 lv_obj_t* img = lv_image_create(scr);
                 lv_image_set_src(img, wallpaper_dsc_);
-                // 按给定尺寸占满全屏
-                lv_image_set_scale(img, lv_image_scale_from_width(img, LV_HOR_RES));
+                // 按屏幕尺寸等比放大铺满全屏（LVGL 缩放单位为 256=100%）
+                if (wallpaper_w_ > 0 && wallpaper_h_ > 0) {
+                    int zoom_w = (LV_HOR_RES * 256) / wallpaper_w_;
+                    int zoom_h = (LV_VER_RES * 256) / wallpaper_h_;
+                    lv_image_set_scale(img, zoom_w > zoom_h ? zoom_w : zoom_h);
+                }
                 lv_obj_set_size(img, LV_HOR_RES, LV_VER_RES);
                 lv_obj_set_pos(img, 0, 0);
                 wallpaper_img_ = img;
@@ -160,7 +166,7 @@ void ScreenHome::Rebuild() {
 
     lv_label_set_text(title_label_, title.c_str());
     lv_obj_set_style_text_color(title_label_, ParseColor(color, 255, 255, 255), 0);
-    lv_obj_set_style_text_font(title_label_, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(title_label_, &BUILTIN_TEXT_FONT, 0);
 
     lv_obj_update_layout(title_label_);
     int y = 40;
@@ -174,7 +180,7 @@ void ScreenHome::Rebuild() {
         lv_obj_set_width(title_label_, LV_HOR_RES * 2 / 3);  // 留出空间以触发滚动
         lv_label_set_long_mode(title_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
         unsigned spd = static_cast<unsigned>(speed * 1000);
-        lv_obj_set_style_anim_speed_ms(title_label_, spd <= 0 ? 5000 : spd, 0);
+        lv_obj_set_style_anim_time(title_label_, spd <= 0 ? 5000 : spd, 0);
     } else {
         lv_label_set_long_mode(title_label_, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(title_label_, LV_HOR_RES);
@@ -187,7 +193,7 @@ void ScreenHome::Rebuild() {
     std::string subtitle = store.Get("general.subtitle");
     lv_label_set_text(subtitle_label_, subtitle.c_str());
     lv_obj_set_style_text_color(subtitle_label_, lv_color_white(), 0);
-    lv_obj_set_style_text_font(subtitle_label_, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(subtitle_label_, &BUILTIN_TEXT_FONT, 0);
     lv_obj_set_width(subtitle_label_, LV_HOR_RES);
     lv_obj_set_style_text_align(subtitle_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(subtitle_label_, 0, y + 34);

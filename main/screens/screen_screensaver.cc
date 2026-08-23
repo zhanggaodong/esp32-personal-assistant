@@ -10,6 +10,8 @@
 
 #include <lvgl.h>
 
+LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
+
 #include "board.h"
 #include "display/display.h"
 #include "config/config_store.h"
@@ -59,7 +61,7 @@ static bool ContentHas(const std::string& content, const char* item) {
 
 // 从 LittleFS 读取并解码背景图到 bg_buf_/bg_dsc_。返回是否成功。
 static bool TryDecodeBackground(const std::string& file, uint8_t** out_buf, size_t* out_len,
-                                int* out_w, int* out_h, void** out_dsc) {
+                                int* out_w, int* out_h, lv_img_dsc_t** out_dsc) {
     std::vector<uint8_t> raw;
     if (file.empty() || !LittleFsStore::ReadFile(file.c_str(), raw) || raw.empty()) {
         return false;
@@ -101,7 +103,7 @@ const AppMetadata& ScreenScreensaver::metadata() {
 
 void ScreenScreensaver::LoadBackground() {
     if (bg_dsc_ != nullptr) {
-        delete static_cast<lv_img_dsc_t*>(bg_dsc_);
+        delete bg_dsc_;
         bg_dsc_ = nullptr;
     }
     if (bg_buf_ != nullptr) {
@@ -150,7 +152,11 @@ void ScreenScreensaver::Rebuild() {
         if (has_bg) {
             lv_obj_t* img = lv_image_create(scr);
             lv_image_set_src(img, bg_dsc_);
-            lv_image_set_scale(img, lv_image_scale_from_width(img, LV_HOR_RES));
+            if (bg_w_ > 0 && bg_h_ > 0) {
+                int zoom_w = (LV_HOR_RES * 256) / bg_w_;
+                int zoom_h = (LV_VER_RES * 256) / bg_h_;
+                lv_image_set_scale(img, zoom_w > zoom_h ? zoom_w : zoom_h);
+            }
             lv_obj_set_pos(img, 0, 0);
             bg_obj_ = img;
         } else {
@@ -169,15 +175,14 @@ void ScreenScreensaver::Rebuild() {
     // 2) 文字公共样式
     std::string color = store.Get("screensaver.font_color");
     lv_color_t fg = ParseColor(color, 255, 255, 255);
-    int font_size = store.GetInt("screensaver.font_size", 40);
-    const lv_font_t* font = font_size >= 32 ? &lv_font_montserrat_32
-                            : (font_size >= 24 ? &lv_font_montserrat_24 : &lv_font_montserrat_14);
+    // 构建环境仅内置一块含中文的字体（BUILTIN_TEXT_FONT），用其绘制
+    const lv_font_t* font = &BUILTIN_TEXT_FONT;
     std::string align = store.Get("screensaver.align");
     lv_text_align_t ta = align == "left" ? LV_TEXT_ALIGN_LEFT
                          : align == "right" ? LV_TEXT_ALIGN_RIGHT
                          : LV_TEXT_ALIGN_CENTER;
 
-    const lv_font_t* small_font = font_size >= 32 ? &lv_font_montserrat_24 : &lv_font_montserrat_14;
+    const lv_font_t* small_font = &BUILTIN_TEXT_FONT;
 
     std::string content = store.Get("screensaver.content");
     bool show_time = ContentHas(content, "time");
