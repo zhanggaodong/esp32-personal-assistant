@@ -365,7 +365,7 @@ bool ScreenAiChat::BuildWav16k(const std::vector<int16_t>& pcm,
     return true;
 }
 
-bool ScreenAiChat::SpeakPcm(const std::vector<int16_t>& pcm) {
+void ScreenAiChat::SpeakPcm(const std::vector<int16_t>& pcm) {
     if (pcm.empty()) {
         return;
     }
