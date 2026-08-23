@@ -8,16 +8,21 @@
 #include "app/app_registry.h"
 #include "app/app_manager.h"
 #include "config/config_store.h"
+#include "storage/littlefs_store.h"
 #include "input/input_router.h"
 #include "web/web_server.h"
 #include "screens/screen_home.h"
 #include "screens/screen_settings.h"
+#include "screens/screen_screensaver.h"
+#include "screens/screen_ai_chat.h"
 
 #define TAG "framework"
 
 // 屏幕模块实例（由框架首次进入时注册）
 ScreenHome g_home_screen;
 ScreenSettings g_settings_screen;
+ScreenScreensaver g_screensaver_screen;
+ScreenAiChat g_ai_chat_screen;
 
 void framework_main() {
     ESP_LOGI(TAG, "Personal Assistant Framework starting...");
@@ -29,9 +34,14 @@ void framework_main() {
     // 配置中心（NVS 持久化）
     ConfigStore::Instance().Init();
 
+    // 壁纸等图片资源（LittleFS 独立分区）
+    LittleFsStore::Mount();
+
     // 注册屏幕模块
     AppRegistry::Instance().Register(&g_home_screen);
     AppRegistry::Instance().Register(&g_settings_screen);
+    AppRegistry::Instance().Register(&g_screensaver_screen);
+    AppRegistry::Instance().Register(&g_ai_chat_screen);
 
     // 启动框架并显示默认屏
     AppManager::Instance().Start();

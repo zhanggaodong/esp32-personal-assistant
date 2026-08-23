@@ -10,6 +10,7 @@ enum EventId : int32_t {
     kEventConfigChanged = 1,      // 配置变更，void* 为 (char*)设备配置 key 或 nullptr
     kEventAppSwitch = 2,          // 应用切换，void* 为 (char*)目标 app id
     kEventNetworkStatus = 3,      // 网络状态变化
+    kEventAiChatRecord = 4,       // AI 对话：切换"录音开始/停止"，ScreenAiChat 订阅
 };
 
 class EventBus {

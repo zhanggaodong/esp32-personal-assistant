@@ -1,6 +1,7 @@
 #include "web_config_api.h"
 
 #include <string.h>
+#include <vector>
 
 #include <esp_log.h>
 
@@ -8,6 +9,7 @@
 #include "config/config_store.h"
 #include "config/config_schema.h"
 #include "app/app_manager.h"
+#include "storage/littlefs_store.h"
 #include "json_util.h"
 #include "web_ui_page.h"
 
@@ -110,6 +112,92 @@ esp_err_t HandleGetStatus(httpd_req_t* req) {
     return ESP_OK;
 }
 
+// 解析 /api/upload?name=xxx.jpg 中的文件名参数
+bool GetQueryName(httpd_req_t* req, std::string& name) {
+    if (req->query_string == nullptr) {
+        return false;
+    }
+    std::string q = req->query_string;
+    size_t pos = 0;
+    while (pos < q.size()) {
+        size_t eq = q.find('=', pos);
+        if (eq == std::string::npos) {
+            break;
+        }
+        std::string key = q.substr(pos, eq - pos);
+        size_t ampersand = q.find('&', eq + 1);
+        if (ampersand == std::string::npos) {
+            ampersand = q.size();
+        }
+        std::string val = q.substr(eq + 1, ampersand - eq - 1);
+        if (key == "name") {
+            name = val;
+            return !name.empty();
+        }
+        pos = ampersand + 1;
+    }
+    return false;
+}
+
+// POST /api/upload?name=wallpaper.jpg  —— body 为原始图片字节，写入 LittleFS
+esp_err_t HandleUpload(httpd_req_t* req) {
+    std::string name;
+    if (!GetQueryName(req, name)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing name param");
+        return ESP_FAIL;
+    }
+    if (req->content_len <= 0 || req->content_len > (2 * 1024 * 1024)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad size");
+        return ESP_FAIL;
+    }
+
+    std::vector<uint8_t> buf;
+    buf.resize(req->content_len);
+    int received = 0;
+    while (received < req->content_len) {
+        int ret = httpd_req_recv(req, reinterpret_cast<char*>(&buf[received]), req->content_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "recv error");
+            return ESP_FAIL;
+        }
+        received += ret;
+    }
+
+    if (!LittleFsStore::WriteFile(name.c_str(), buf.data(), buf.size())) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "write failed");
+        return ESP_FAIL;
+    }
+    SendJson(req, "{\"ok\":true,\"file\":\"" + json_util::Escape(name) + "\",\"size\":" + std::to_string(buf.size()) + "}");
+    return ESP_OK;
+}
+
+// GET /api/image/{name} —— 读取 LittleFS 图片字节返回给客户端
+esp_err_t HandleGetImage(httpd_req_t* req) {
+    std::string uri = req->uri;
+    const char* prefix = "/api/image/";
+    size_t pp = uri.find(prefix);
+    if (pp == std::string::npos) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+        return ESP_FAIL;
+    }
+    std::string name = uri.substr(pp + strlen(prefix));
+    if (name.empty()) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+        return ESP_FAIL;
+    }
+
+    std::vector<uint8_t> data;
+    if (!LittleFsStore::ReadFile(name.c_str(), data)) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_send(req, reinterpret_cast<const char*>(data.data()), data.size());
+    return ESP_OK;
+}
+
 }  // namespace
 
 void RegisterConfigApi(httpd_handle_t server) {
@@ -121,9 +209,15 @@ void RegisterConfigApi(httpd_handle_t server) {
         .uri = "/api/config", .method = HTTP_PUT, .handler = HandlePutConfig, .user_ctx = nullptr};
     static const httpd_uri_t get_status = {
         .uri = "/api/status", .method = HTTP_GET, .handler = HandleGetStatus, .user_ctx = nullptr};
+    static const httpd_uri_t upload = {
+        .uri = "/api/upload", .method = HTTP_POST, .handler = HandleUpload, .user_ctx = nullptr};
+    static const httpd_uri_t get_image = {
+        .uri = "/api/image/*", .method = HTTP_GET, .handler = HandleGetImage, .user_ctx = nullptr};
 
     httpd_register_uri_handler(server, &root);
     httpd_register_uri_handler(server, &get_config);
     httpd_register_uri_handler(server, &put_config);
     httpd_register_uri_handler(server, &get_status);
+    httpd_register_uri_handler(server, &upload);
+    httpd_register_uri_handler(server, &get_image);
 }

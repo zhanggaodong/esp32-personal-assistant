@@ -66,6 +66,9 @@ void InputRouter::HandleKeyEvent(const char* button_id, const char* event) {
     if (button_id == nullptr || event == nullptr) {
         return;
     }
+    // 任何按键都视为一次用户交互：重置空闲计时 + 若在息屏则唤醒回主页
+    AppManager::Instance().NotifyInput();
+
     // 按钮 "vol_up" + 事件 "click" -> 配置键名 "vol_up_click"
     std::string cfgName = std::string(button_id) + "_" + event;
     auto it = mapping_.find(cfgName);
@@ -92,6 +95,11 @@ void InputRouter::Execute(KeyAction action) {
             mgr.SwitchTo("home");
             break;
         case KeyAction::kConfirm:
+            // 在 AI 对话屏内，确认键作为"录音开始/停止"开关
+            if (strcmp(mgr.CurrentId(), "ai_chat") == 0) {
+                EventBus::Instance().Post(kEventAiChatRecord);
+            }
+            break;
         case KeyAction::kNone:
         default:
             break;

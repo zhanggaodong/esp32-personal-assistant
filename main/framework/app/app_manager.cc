@@ -7,8 +7,15 @@
 
 #include "app_registry.h"
 #include "board.h"
+#include "config/config_store.h"
 
 #define TAG "AppManager"
+
+// 空闲检测定时器回调：超时则进入息屏屏
+static void OnIdleTick(void* arg) {
+    AppManager* mgr = static_cast<AppManager*>(arg);
+    mgr->NotifyIdle();  // 需在头文件声明为公开，见下
+}
 
 AppManager& AppManager::Instance() {
     static AppManager instance;
@@ -35,7 +42,50 @@ void AppManager::Start() {
     current_->onStart();
     current_->onShow();
     started_ = true;
+    last_input_us_ = esp_timer_get_time();
+
+    // 启动周期空闲检测（1s）
+    if (idle_timer_ == nullptr) {
+        esp_timer_create_args_t args = {};
+        args.callback = OnIdleTick;
+        args.arg = this;
+        args.name = "appmgr_idle";
+        esp_timer_create(&args, &idle_timer_);
+        esp_timer_start_periodic(idle_timer_, 1000 * 1000);
+    }
+
     ESP_LOGI(TAG, "Started with app: %s (%s)", current_->metadata().id, current_->metadata().name);
+}
+
+void AppManager::NotifyInput() {
+    last_input_us_ = esp_timer_get_time();
+    // 若当前正处息屏，任意交互唤醒回主页
+    if (current_ != nullptr && strcmp(current_->metadata().id, "screensaver") == 0) {
+        SwitchTo("home");
+    }
+}
+
+void AppManager::NotifyIdle() {
+    if (!started_ || current_ == nullptr) {
+        return;
+    }
+    ConfigStore& store = ConfigStore::Instance();
+    if (!store.GetBool("screensaver.enabled", true)) {
+        return;
+    }
+    int timeout_sec = store.GetInt("screensaver.timeout_sec", 60);
+    if (timeout_sec <= 0) {
+        return;
+    }
+    // 已处于息屏或非主页时不重复切入
+    const char* cur = current_->metadata().id;
+    if (strcmp(cur, "screensaver") == 0 || strcmp(cur, "home") != 0) {
+        return;
+    }
+    uint64_t since = (esp_timer_get_time() - last_input_us_) / 1000 / 1000;
+    if (since >= (uint64_t)timeout_sec) {
+        SwitchTo("screensaver");
+    }
 }
 
 bool AppManager::SwitchTo(const char* id) {
