@@ -23,7 +23,7 @@ dependencies:
   78/esp-ml307: ~3.5.3
   78/xiaozhi-fonts: ~1.5.5
   espressif/led_strip: ~3.0.1
-  espressif/esp_littlefs: ~1.14
+  joltwallet/littlefs: ~1.14
   espressif/esp_codec_dev: ~1.5
   espressif/esp-sr: ~2.2.0
   espressif/button: ~4.1.3
