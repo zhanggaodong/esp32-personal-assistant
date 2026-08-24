@@ -7,6 +7,7 @@
 #include "config/config_store.h"
 #include "event_bus.h"
 #include "board.h"
+#include "display/display.h"
 #include "app/app_manager.h"
 
 #define TAG "InputRouter"
