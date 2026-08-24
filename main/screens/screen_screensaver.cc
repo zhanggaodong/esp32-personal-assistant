@@ -10,11 +10,10 @@
 
 #include <lvgl.h>
 
-LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
-
 #include "board.h"
 #include "display/display.h"
 #include "config/config_store.h"
+#include "framework/ui/text_font.h"
 #include "storage/littlefs_store.h"
 #include "display/lvgl_display/jpg/jpeg_to_image.h"
 
@@ -175,14 +174,13 @@ void ScreenScreensaver::Rebuild() {
     // 2) 文字公共样式
     std::string color = store.Get("screensaver.font_color");
     lv_color_t fg = ParseColor(color, 255, 255, 255);
-    // 构建环境仅内置一块含中文的字体（BUILTIN_TEXT_FONT），用其绘制
-    const lv_font_t* font = &BUILTIN_TEXT_FONT;
+    const lv_font_t* font = ResolveFrameworkTextFont(display);
     std::string align = store.Get("screensaver.align");
     lv_text_align_t ta = align == "left" ? LV_TEXT_ALIGN_LEFT
                          : align == "right" ? LV_TEXT_ALIGN_RIGHT
                          : LV_TEXT_ALIGN_CENTER;
 
-    const lv_font_t* small_font = &BUILTIN_TEXT_FONT;
+    const lv_font_t* small_font = font;
 
     std::string content = store.Get("screensaver.content");
     bool show_time = ContentHas(content, "time");

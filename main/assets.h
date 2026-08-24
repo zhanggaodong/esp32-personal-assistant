@@ -24,7 +24,9 @@ public:
     ~Assets();
 
     bool Download(std::string url, std::function<void(int progress, size_t speed)> progress_callback);
-    bool Apply();
+    // Framework mode does not start the legacy Application audio service, so it
+    // must apply visual assets without attempting to load speech models.
+    bool Apply(bool include_speech_models = true);
     bool GetAssetData(const std::string& name, void*& ptr, size_t& size);
 
     inline bool partition_valid() const { return partition_valid_; }

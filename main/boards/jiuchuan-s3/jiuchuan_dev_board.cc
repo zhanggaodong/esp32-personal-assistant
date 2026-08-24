@@ -73,15 +73,43 @@ private:
         // 公式: 显示音量 = (内部音量 / 80) * 100
         return (internal_volume * 100) / 80;
     }
+
+    // 框架模式下板级浅睡计时器永久禁用：息屏进入/退出由 Framework 的
+    // AppManager + Screensaver 屏统一管理（网页可配 timeout/keep_on_sec），
+    // 避免 60s 时板级同时压背光导致"切了时钟画面实际一片黑"的双重冲突。
+    void SetPowerSaveTimerEnabled(bool enabled) {
+#ifdef CONFIG_APP_MODE_FRAMEWORK
+        (void)enabled;
+        return;
+#else
+        if (power_save_timer_ != nullptr) {
+            power_save_timer_->SetEnabled(enabled);
+        }
+#endif
+    }
+
+    // 统一唤醒：框架模式直接恢复显示与背光（返回主页由 AppManager::NotifyInput 处理），
+    // 传统模式走板级 PowerSaveTimer::WakeUp()。所有唤醒入口统一经此函数。
+    void WakeUpScreen() {
+#ifdef CONFIG_APP_MODE_FRAMEWORK
+        if (display_ != nullptr) {
+            display_->SetPowerSaveMode(false);
+        }
+        if (GetBacklight() != nullptr) {
+            GetBacklight()->RestoreBrightness();
+        }
+#else
+        if (power_save_timer_ != nullptr) {
+            power_save_timer_->WakeUp();
+        }
+#endif
+    }
     
     void InitializePowerManager() {
         power_manager_ = new PowerManager(PWR_ADC_GPIO);
         power_manager_->OnChargingStatusChanged([this](bool is_charging) {
-            if (is_charging) {
-                power_save_timer_->SetEnabled(false);
-            } else {
-                power_save_timer_->SetEnabled(true);
-            }
+            // 充电时禁用电量驱动的浅睡切换；框架模式下为 no-op
+            SetPowerSaveTimerEnabled(!is_charging);
         });
     }
 
@@ -113,9 +141,14 @@ private:
             }
         }
         #endif
-        //一分钟进入浅睡眠，5分钟进入深睡眠关机
+        //一分钟进入浅睡眠，5分钟进入深睡眠关机（深睡参数 -1 = 禁用）
         power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
         // power_save_timer_ = new PowerSaveTimer(-1, 6, 10);//test
+#ifdef CONFIG_APP_MODE_FRAMEWORK
+        // 框架模式：息屏由 Framework 统一管理，板级计时器保持禁用，唤醒走 WakeUpScreen()
+        power_save_timer_->SetEnabled(false);
+        return;
+#else
         power_save_timer_->OnEnterSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(1);
@@ -139,6 +172,7 @@ private:
             #endif
         });
         power_save_timer_->SetEnabled(true);
+#endif
     }
 
     void InitializeI2c() {
@@ -171,7 +205,7 @@ private:
 
         boot_button_.OnClick([this]() {
             ESP_LOGI(TAG, "Boot button clicked");
-            power_save_timer_->WakeUp();
+            WakeUpScreen();
         });
 
         // 检查电源按钮初始状态
@@ -247,7 +281,7 @@ private:
         // 电源键三击：重置WiFi
         pwr_button_.OnMultipleClick([this]() {
             ESP_LOGI(TAG, "Power button triple click: 重置WiFi");
-            power_save_timer_->WakeUp();
+            WakeUpScreen();
             EnterWifiConfigMode();
         }, 3);
 
@@ -390,7 +424,7 @@ public:
         charging = power_manager_->IsCharging();
         discharging = power_manager_->IsDischarging();
         if (discharging != last_discharging) {
-            power_save_timer_->SetEnabled(discharging);
+            SetPowerSaveTimerEnabled(discharging);
             last_discharging = discharging;
         }
         level = power_manager_->GetBatteryLevel();
@@ -399,7 +433,7 @@ public:
 
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
         if (level != PowerSaveLevel::LOW_POWER) {
-            power_save_timer_->WakeUp();
+            WakeUpScreen();
         }
         WifiBoard::SetPowerSaveLevel(level);
     }

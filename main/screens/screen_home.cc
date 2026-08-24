@@ -7,11 +7,10 @@
 
 #include <lvgl.h>
 
-LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
-
 #include "board.h"
 #include "display/display.h"
 #include "config/config_store.h"
+#include "framework/ui/text_font.h"
 #include "storage/littlefs_store.h"
 #include "display/lvgl_display/jpg/jpeg_to_image.h"
 #include "display/lvgl_display/lvgl_image.h"
@@ -114,6 +113,12 @@ void ScreenHome::Rebuild() {
     }
     DisplayLockGuard lock(display);
 
+    // 切走主页时 onHide() 给三个成员加了 HIDDEN 标志, 这里必须先清除,
+    // 否则"切走再切回"后整屏保持隐藏, 表现为二次进入白屏
+    if (wallpaper_img_ != nullptr) lv_obj_clear_flag(wallpaper_img_, LV_OBJ_FLAG_HIDDEN);
+    if (title_label_ != nullptr) lv_obj_clear_flag(title_label_, LV_OBJ_FLAG_HIDDEN);
+    if (subtitle_label_ != nullptr) lv_obj_clear_flag(subtitle_label_, LV_OBJ_FLAG_HIDDEN);
+
     auto& store = ConfigStore::Instance();
 
     // 屏幕根对象
@@ -166,7 +171,8 @@ void ScreenHome::Rebuild() {
 
     lv_label_set_text(title_label_, title.c_str());
     lv_obj_set_style_text_color(title_label_, ParseColor(color, 255, 255, 255), 0);
-    lv_obj_set_style_text_font(title_label_, &BUILTIN_TEXT_FONT, 0);
+    const lv_font_t* text_font = ResolveFrameworkTextFont(display);
+    lv_obj_set_style_text_font(title_label_, text_font, 0);
 
     lv_obj_update_layout(title_label_);
     int y = 40;
@@ -193,7 +199,7 @@ void ScreenHome::Rebuild() {
     std::string subtitle = store.Get("general.subtitle");
     lv_label_set_text(subtitle_label_, subtitle.c_str());
     lv_obj_set_style_text_color(subtitle_label_, lv_color_white(), 0);
-    lv_obj_set_style_text_font(subtitle_label_, &BUILTIN_TEXT_FONT, 0);
+    lv_obj_set_style_text_font(subtitle_label_, text_font, 0);
     lv_obj_set_width(subtitle_label_, LV_HOR_RES);
     lv_obj_set_style_text_align(subtitle_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(subtitle_label_, 0, y + 34);

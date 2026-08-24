@@ -104,7 +104,7 @@ bool Assets::InitializePartition() {
     return checksum_valid_;
 }
 
-bool Assets::Apply() {
+bool Assets::Apply(bool include_speech_models) {
     void* ptr = nullptr;
     size_t size = 0;
     if (!GetAssetData("index.json", ptr, size)) {
@@ -127,7 +127,7 @@ bool Assets::Apply() {
     }
     
     cJSON* srmodels = cJSON_GetObjectItem(root, "srmodels");
-    if (cJSON_IsString(srmodels)) {
+    if (include_speech_models && cJSON_IsString(srmodels)) {
         std::string srmodels_file = srmodels->valuestring;
         if (GetAssetData(srmodels_file, ptr, size)) {
             if (models_list_ != nullptr) {

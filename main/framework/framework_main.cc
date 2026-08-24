@@ -5,6 +5,7 @@
 #include <esp_log.h>
 
 #include "board.h"
+#include "assets.h"
 #include "app/app_registry.h"
 #include "app/app_manager.h"
 #include "config/config_store.h"
@@ -30,6 +31,12 @@ void framework_main() {
     // 平台层：构建并持有屏幕/音频/WiFi/按键/背光等硬件
     auto& board = Board::GetInstance();
     board.StartNetwork();  // 异步联网，供 Web 配置页访问
+
+    // The Action packages font_puhui_common_20_4.bin in assets. Framework
+    // mode bypasses Application::Initialize(), so load UI assets explicitly.
+    if (!Assets::GetInstance().Apply(false)) {
+        ESP_LOGW(TAG, "UI assets unavailable; using built-in fallback font");
+    }
 
     // 配置中心（NVS 持久化）
     ConfigStore::Instance().Init();

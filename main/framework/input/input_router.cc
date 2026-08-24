@@ -6,6 +6,7 @@
 
 #include "config/config_store.h"
 #include "event_bus.h"
+#include "board.h"
 #include "app/app_manager.h"
 
 #define TAG "InputRouter"
@@ -66,7 +67,15 @@ void InputRouter::HandleKeyEvent(const char* button_id, const char* event) {
     if (button_id == nullptr || event == nullptr) {
         return;
     }
-    // 任何按键都视为一次用户交互：重置空闲计时 + 若在息屏则唤醒回主页
+    // 任何按键都视为一次用户交互：先恢复显示与背光（板级可能曾在传统模式
+    // 或其它路径压暗背光），再重置空闲计时 + 若在息屏则唤醒回主页
+    auto& board = Board::GetInstance();
+    if (board.GetDisplay() != nullptr) {
+        board.GetDisplay()->SetPowerSaveMode(false);
+    }
+    if (board.GetBacklight() != nullptr) {
+        board.GetBacklight()->RestoreBrightness();
+    }
     AppManager::Instance().NotifyInput();
 
     // 按钮 "vol_up" + 事件 "click" -> 配置键名 "vol_up_click"

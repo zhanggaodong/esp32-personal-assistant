@@ -550,6 +550,9 @@ elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_CAM)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 elseif(CONFIG_BOARD_TYPE_JIUCHUAN)
     set(BOARD_TYPE "jiuchuan-s3")
+    # 内嵌字体与 cbin 全字库取自组件 78/xiaozhi-fonts v1.5.5：
+    # font_puhui_basic_20_4(内嵌) -> cbin/font_puhui_common_20_4.bin(全字库, 组件真实携带)
+    # 全字库经 Assets 注入 Framework 主题, 解决动态中文缺字
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)

@@ -11,11 +11,9 @@
 #include "audio/audio_codec.h"
 #include "display/display.h"
 #include "config/config_store.h"
+#include "framework/ui/text_font.h"
 #include "framework/event_bus.h"
 #include "framework/ai/ai_client.h"
-
-// 中文显示字体（跟随板级配置，见 CMakeLists BUILTIN_TEXT_FONT）
-LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 
 #define TAG "ScreenAiChat"
 
@@ -106,12 +104,13 @@ void ScreenAiChat::BuildUi() {
     }
     DisplayLockGuard lock(display);
     lv_obj_t* scr = lv_screen_active();
+    const lv_font_t* text_font = ResolveFrameworkTextFont(display);
 
     if (title_label_ == nullptr) {
         title_label_ = lv_label_create(scr);
     }
     lv_label_set_text(title_label_, "AI 语音助手");
-    lv_obj_set_style_text_font(title_label_, &BUILTIN_TEXT_FONT, 0);
+    lv_obj_set_style_text_font(title_label_, text_font, 0);
     lv_obj_set_style_text_color(title_label_, lv_color_white(), 0);
     lv_obj_set_width(title_label_, LV_HOR_RES);
     lv_obj_set_style_text_align(title_label_, LV_TEXT_ALIGN_CENTER, 0);
@@ -120,7 +119,7 @@ void ScreenAiChat::BuildUi() {
     if (status_label_ == nullptr) {
         status_label_ = lv_label_create(scr);
     }
-    lv_obj_set_style_text_font(status_label_, &BUILTIN_TEXT_FONT, 0);
+    lv_obj_set_style_text_font(status_label_, text_font, 0);
     lv_obj_set_style_text_color(status_label_, lv_color_make(160, 224, 255), 0);
     lv_obj_set_width(status_label_, LV_HOR_RES);
     lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
@@ -143,7 +142,7 @@ void ScreenAiChat::BuildUi() {
     }
     lv_obj_set_width(text_label_, lv_obj_get_width(scroll_cont_));
     lv_label_set_long_mode(text_label_, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(text_label_, &BUILTIN_TEXT_FONT, 0);
+    lv_obj_set_style_text_font(text_label_, text_font, 0);
     lv_obj_set_style_text_color(text_label_, lv_color_white(), 0);
     lv_label_set_text(text_label_, "你好，我是你的桌面助手，直接说话即可。");
     lv_obj_align(text_label_, LV_ALIGN_TOP_LEFT, 0, 0);

@@ -678,8 +678,13 @@ def get_text_font_path(builtin_text_font, xiaozhi_fonts_path):
     if os.path.exists(font_path):
         return font_path
     else:
-        print(f"Warning: Font file not found: {font_path}")
-        return None
+        # 字体缺失会导致 Framework 界面中文回退到精简内嵌字库而缺字,
+        # 必须 fail-fast 让构建立即失败, 而不是静默生成一份"带病"的 assets
+        print(f"ERROR: Text font file not found: {font_path}")
+        print("  Expected the 'common' (full CJK) variant from component 78/xiaozhi-fonts")
+        print("  (v1.5.5 ships cbin/font_puhui_common_20_4.bin). Check that xiaozhi_fonts_path")
+        print("  points at the managed_components copy and dependencies.lock is on a recent version.")
+        raise SystemExit(1)
 
 
 def get_emoji_collection_path(default_emoji_collection, xiaozhi_fonts_path):
