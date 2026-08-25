@@ -735,6 +735,9 @@ if(CONFIG_APP_MODE_HEADLESS_VOICE)
     )
 endif()
 
+# 设备日志环（Web 配置页 /api/logs 使用；两种模式都编）
+list(APPEND SOURCES "framework/device_log.cc")
+
 # 无屏本地提示音（WAV，配网/错误等无网络场景；播放器见 audio_prompt_player.cc）
 file(GLOB PROMPT_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/prompts/*.wav)
 

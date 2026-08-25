@@ -1,11 +1,13 @@
 #include "ai_client.h"
 
+#include <esp_crt_bundle.h>
 #include <esp_http_client.h>
 #include <esp_log.h>
 #include <cstring>
 
 #include "../config/config_store.h"
 #include "../web/json_util.h"
+#include "../device_log.h"
 #include "base64.h"
 
 #define TAG "AiClient"
@@ -47,6 +49,8 @@ esp_err_t PerformPost(const std::string& url,
     cfg.method = HTTP_METHOD_POST;
     cfg.timeout_ms = 15000;  // 连接/首包超时；SSE 长流由 open/read 循环处理
     cfg.buffer_size = 2048;
+    // 启用全局 CA bundle：访问 https 时必须校验证书（依赖设备已联网校时）。
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == nullptr) {
@@ -202,26 +206,31 @@ bool AiClient::DoLogin() {
                                 headers, payload, "application/json", resp);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Login HTTP error: %s", esp_err_to_name(err));
+        DeviceLog::Log('E', "AiClient", "登录网络/握手失败(%s)", esp_err_to_name(err));
         return false;
     }
     if (resp.status >= 400) {
         ESP_LOGE(TAG, "Login failed status=%d body=%s", resp.status,
                  resp.body.c_str());
+        DeviceLog::Log('E', "AiClient", "登录失败 HTTP %d", resp.status);
         return false;
     }
 
     std::map<std::string, std::string> obj;
     if (!json_util::ParseFlatObject(resp.body.c_str(), obj)) {
         ESP_LOGE(TAG, "Login response unparseable: %s", resp.body.c_str());
+        DeviceLog::Log('E', "AiClient", "登录响应解析失败");
         return false;
     }
     auto it = obj.find("accessToken");
     if (it == obj.end() || it->second.empty()) {
         ESP_LOGE(TAG, "Login response missing accessToken");
+        DeviceLog::Log('E', "AiClient", "登录响应缺少 accessToken");
         return false;
     }
     access_token_ = it->second;
     ESP_LOGI(TAG, "Login ok, token len=%u", (unsigned)access_token_.size());
+    DeviceLog::Log('I', "AiClient", "登录成功");
     return true;
 }
 
@@ -314,16 +323,19 @@ bool AiClient::DoTranscribe(const std::vector<uint8_t>& wav, std::string& out_te
                                 headers, body, "application/json", resp);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Transcribe HTTP error: %s", esp_err_to_name(err));
+        DeviceLog::Log('E', "AiClient", "ASR 网络失败(%s)", esp_err_to_name(err));
         return false;
     }
     if (resp.status == 401) {
         InvalidateToken();
         ESP_LOGW(TAG, "Transcribe 401, will re-login next call");
+        DeviceLog::Log('W', "AiClient", "ASR token 失效，重新登录");
         return false;
     }
     if (resp.status >= 400) {
         ESP_LOGE(TAG, "Transcribe failed status=%d body=%s", resp.status,
                  resp.body.c_str());
+        DeviceLog::Log('E', "AiClient", "ASR 失败 HTTP %d", resp.status);
         return false;
     }
 
@@ -338,6 +350,7 @@ bool AiClient::DoTranscribe(const std::vector<uint8_t>& wav, std::string& out_te
         return false;
     }
     out_text = it->second;
+    DeviceLog::Log('I', "AiClient", "ASR 识别完成: %s", out_text.c_str());
     return true;
 }
 
@@ -359,6 +372,7 @@ bool AiClient::DoChat(const std::string& text, const OnDeltaFn& on_delta,
     cfg.method = HTTP_METHOD_POST;
     cfg.timeout_ms = 60000;  // 长流，首包等待放宽
     cfg.buffer_size = 2048;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;  // https 证书校验
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == nullptr) {
@@ -376,6 +390,7 @@ bool AiClient::DoChat(const std::string& text, const OnDeltaFn& on_delta,
     esp_err_t err = esp_http_client_open(client, (int)payload.size());
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Chat open error: %s", esp_err_to_name(err));
+        DeviceLog::Log('E', "AiClient", "Chat 连接失败(%s)", esp_err_to_name(err));
         esp_http_client_cleanup(client);
         return false;
     }
@@ -389,12 +404,14 @@ bool AiClient::DoChat(const std::string& text, const OnDeltaFn& on_delta,
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         ESP_LOGW(TAG, "Chat 401");
+        DeviceLog::Log('W', "AiClient", "Chat token 失效，重新登录");
         return false;
     }
     if (status >= 400) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         ESP_LOGE(TAG, "Chat status=%d", status);
+        DeviceLog::Log('E', "AiClient", "Chat 失败 HTTP %d", status);
         return false;
     }
 
@@ -407,6 +424,11 @@ bool AiClient::DoChat(const std::string& text, const OnDeltaFn& on_delta,
                     out_conversation_id = it->second;
                 }
             }
+            DeviceLog::Log('I', "AiClient", "Chat 回复结束");
+            return;
+        }
+        if (event == "error") {
+            DeviceLog::Log('E', "AiClient", "Chat 服务端报错: %s", data.c_str());
             return;
         }
         // 默认 data 事件：{"text":"增量"}
@@ -453,6 +475,7 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
     cfg.method = HTTP_METHOD_POST;
     cfg.timeout_ms = 60000;
     cfg.buffer_size = 2048;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;  // https 证书校验
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == nullptr) {
@@ -470,6 +493,7 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
     esp_err_t err = esp_http_client_open(client, (int)payload.size());
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "TTS open error: %s", esp_err_to_name(err));
+        DeviceLog::Log('E', "AiClient", "TTS 连接失败(%s)", esp_err_to_name(err));
         esp_http_client_cleanup(client);
         return false;
     }
@@ -483,12 +507,14 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         ESP_LOGW(TAG, "TTS 401");
+        DeviceLog::Log('W', "AiClient", "TTS token 失效，重新登录");
         return false;
     }
     if (status >= 400) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         ESP_LOGE(TAG, "TTS status=%d", status);
+        DeviceLog::Log('E', "AiClient", "TTS 失败 HTTP %d", status);
         return false;
     }
 
@@ -512,8 +538,10 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
                     on_pcm((const int16_t*)pcm.data(), pcm.size() / 2);
                 }
             }
+        } else if (ty->second == "done") {
+            DeviceLog::Log('I', "AiClient", "TTS 合成完成");
         }
-        // metadata / done 忽略
+        // metadata 忽略
     });
 
     char buf[1024];

@@ -1,11 +1,30 @@
 #include "headless_network_controller.h"
 
 #include <esp_log.h>
+#include <esp_netif_sntp.h>
 
 #include "headless_led_controller.h"
 #include "audio_prompt_player.h"
+#include "device_log.h"
 
 #define TAG "HeadlessNet"
+
+namespace {
+
+// 联网成功后同步系统时间。HTTPS 证书校验依赖正确时间（默认 1970 会握手
+// 失败），必须在设备调后端前完成一次 NTP 校时。
+void StartSntpIfNeeded() {
+    static bool started = false;
+    if (started) {
+        return;
+    }
+    started = true;
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&cfg);
+    DeviceLog::Log('I', "HeadlessNet", "已启动 NTP 校时(pool.ntp.org)");
+}
+
+}  // namespace
 
 HeadlessNetworkController& HeadlessNetworkController::Instance() {
     static HeadlessNetworkController instance;
@@ -33,6 +52,9 @@ void HeadlessNetworkController::OnNetworkEvent(NetworkEvent event,
                 success_prompted_ = true;
                 prompt.Play(AudioPromptPlayer::Prompt::kProvisionSuccess);
             }
+            DeviceLog::Log('I', "HeadlessNet", "WiFi 已连接(%s)", data.c_str());
+            // https 证书校验需要正确系统时间：联网后立即校时
+            StartSntpIfNeeded();
             ESP_LOGI(TAG, "WiFi connected (%s)", data.c_str());
             break;
 

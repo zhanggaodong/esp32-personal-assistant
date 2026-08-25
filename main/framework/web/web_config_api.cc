@@ -11,6 +11,7 @@
 #include "app/app_manager.h"
 #include "storage/littlefs_store.h"
 #include "json_util.h"
+#include "device_log.h"
 #include "web_ui_page.h"
 
 #ifdef CONFIG_APP_MODE_HEADLESS_VOICE
@@ -165,6 +166,32 @@ esp_err_t HandleGetStatus(httpd_req_t* req) {
 #endif
 }
 
+// GET /api/logs —— 返回设备日志环（登录/请求/对话关键日志），供排查。
+esp_err_t HandleGetLogs(httpd_req_t* req) {
+    auto logs = DeviceLog::Snapshot();
+    std::string out = "{\"logs\":[";
+    for (size_t i = 0; i < logs.size(); ++i) {
+        if (i > 0) {
+            out += ",";
+        }
+        const auto& e = logs[i];
+        out += "{\"t\":" + std::to_string(e.ts_ms) +
+               ",\"l\":\"" + std::string(1, e.level) +
+               "\",\"tag\":\"" + json_util::Escape(e.tag) +
+               "\",\"m\":\"" + json_util::Escape(e.msg) + "\"}";
+    }
+    out += "]}";
+    SendJson(req, out);
+    return ESP_OK;
+}
+
+// DELETE /api/logs —— 清空设备日志
+esp_err_t HandleClearLogs(httpd_req_t* req) {
+    DeviceLog::Clear();
+    SendJson(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 // 解析 /api/upload?name=xxx.jpg 中的文件名参数
 bool GetQueryName(httpd_req_t* req, std::string& name) {
     size_t len = httpd_req_get_url_query_len(req);
@@ -266,6 +293,10 @@ void RegisterConfigApi(httpd_handle_t server) {
         .uri = "/api/config", .method = HTTP_PUT, .handler = HandlePutConfig, .user_ctx = nullptr};
     static const httpd_uri_t get_status = {
         .uri = "/api/status", .method = HTTP_GET, .handler = HandleGetStatus, .user_ctx = nullptr};
+    static const httpd_uri_t get_logs = {
+        .uri = "/api/logs", .method = HTTP_GET, .handler = HandleGetLogs, .user_ctx = nullptr};
+    static const httpd_uri_t clear_logs = {
+        .uri = "/api/logs", .method = HTTP_DELETE, .handler = HandleClearLogs, .user_ctx = nullptr};
     static const httpd_uri_t upload = {
         .uri = "/api/upload", .method = HTTP_POST, .handler = HandleUpload, .user_ctx = nullptr};
     static const httpd_uri_t get_image = {
@@ -275,6 +306,8 @@ void RegisterConfigApi(httpd_handle_t server) {
     httpd_register_uri_handler(server, &get_config);
     httpd_register_uri_handler(server, &put_config);
     httpd_register_uri_handler(server, &get_status);
+    httpd_register_uri_handler(server, &get_logs);
+    httpd_register_uri_handler(server, &clear_logs);
     httpd_register_uri_handler(server, &upload);
     httpd_register_uri_handler(server, &get_image);
 }
