@@ -102,6 +102,40 @@ esp_err_t PerformPost(const std::string& url,
     return ESP_OK;
 }
 
+// 后端全局响应拦截器把成功响应包成 {"success":true,"data":{...},"meta":{...}}。
+// 为兼容（同时兼容未来去掉包装），同一字段先查顶层、再查 data 内层。
+// out_found = 是否在任意一层找到该字段（找不到时 out_value 不变）。
+void ReadResponseField(const std::string& body, const std::string& key,
+                       std::string& out_value, bool& out_found) {
+    out_found = false;
+    // 先尝试顶层（扁平响应）
+    std::map<std::string, std::string> top;
+    if (json_util::ParseFlatObject(body.c_str(), top)) {
+        auto it = top.find(key);
+        if (it != top.end()) {
+            out_value = it->second;
+            out_found = true;
+            return;
+        }
+    }
+    // 未命中：寻找 "data":{...} 内层再做扁平解析（后端 ResponseInterceptor 包装）
+    size_t pos = body.find("\"data\"");
+    if (pos != std::string::npos) {
+        size_t brace = body.find('{', pos + 6);
+        if (brace != std::string::npos) {
+            std::string inner = body.substr(brace);
+            std::map<std::string, std::string> nested;
+            if (json_util::ParseFlatObject(inner.c_str(), nested)) {
+                auto it = nested.find(key);
+                if (it != nested.end()) {
+                    out_value = it->second;
+                    out_found = true;
+                }
+            }
+        }
+    }
+}
+
 // SSE 行级解析器：Feed() 送入响应字节流，逐行触发回调。
 class SseParser {
 public:
@@ -216,19 +250,15 @@ bool AiClient::DoLogin() {
         return false;
     }
 
-    std::map<std::string, std::string> obj;
-    if (!json_util::ParseFlatObject(resp.body.c_str(), obj)) {
-        ESP_LOGE(TAG, "Login response unparseable: %s", resp.body.c_str());
-        DeviceLog::Log('E', "AiClient", "登录响应解析失败");
-        return false;
-    }
-    auto it = obj.find("accessToken");
-    if (it == obj.end() || it->second.empty()) {
-        ESP_LOGE(TAG, "Login response missing accessToken");
+    std::string token;
+    bool found = false;
+    ReadResponseField(resp.body, "accessToken", token, found);
+    if (!found || token.empty()) {
+        ESP_LOGE(TAG, "Login response missing accessToken: %s", resp.body.c_str());
         DeviceLog::Log('E', "AiClient", "登录响应缺少 accessToken");
         return false;
     }
-    access_token_ = it->second;
+    access_token_ = token;
     ESP_LOGI(TAG, "Login ok, token len=%u", (unsigned)access_token_.size());
     DeviceLog::Log('I', "AiClient", "登录成功");
     return true;
@@ -339,17 +369,15 @@ bool AiClient::DoTranscribe(const std::vector<uint8_t>& wav, std::string& out_te
         return false;
     }
 
-    std::map<std::string, std::string> obj;
-    if (!json_util::ParseFlatObject(resp.body.c_str(), obj)) {
-        ESP_LOGE(TAG, "Transcribe response unparseable");
+    std::string text;
+    bool found = false;
+    ReadResponseField(resp.body, "text", text, found);
+    if (!found || text.empty()) {
+        ESP_LOGE(TAG, "Transcribe response missing text: %s", resp.body.c_str());
+        DeviceLog::Log('E', "AiClient", "ASR 响应缺少 text");
         return false;
     }
-    auto it = obj.find("text");
-    if (it == obj.end()) {
-        ESP_LOGE(TAG, "Transcribe response missing text");
-        return false;
-    }
-    out_text = it->second;
+    out_text = text;
     DeviceLog::Log('I', "AiClient", "ASR 识别完成: %s", out_text.c_str());
     return true;
 }
