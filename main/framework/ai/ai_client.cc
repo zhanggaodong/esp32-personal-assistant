@@ -3,7 +3,10 @@
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
 #include <esp_log.h>
+#include <cJSON.h>
 #include <cstring>
+#include <initializer_list>
+#include <utility>
 
 #include "../config/config_store.h"
 #include "../web/json_util.h"
@@ -30,6 +33,31 @@ std::string JoinUrl(const std::string& base, const std::string& path) {
         p.erase(0, 1);
     }
     return b + "/" + p;
+}
+
+bool BuildJsonObject(
+        std::initializer_list<std::pair<const char*, std::string>> fields,
+        std::string& out) {
+    cJSON* root = cJSON_CreateObject();
+    if (root == nullptr) {
+        return false;
+    }
+    for (const auto& field : fields) {
+        if (cJSON_AddStringToObject(root, field.first,
+                                    field.second.c_str()) == nullptr) {
+            cJSON_Delete(root);
+            return false;
+        }
+    }
+
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json == nullptr) {
+        return false;
+    }
+    out.assign(json);
+    cJSON_free(json);
+    return true;
 }
 
 // 一次同步 HTTP POST。headers 逐行（如 "Content-Type: application/json"）。
@@ -84,7 +112,8 @@ esp_err_t PerformPost(const std::string& url,
         }
     }
 
-    out.status = esp_http_client_fetch_headers(client);
+    esp_http_client_fetch_headers(client);
+    out.status = esp_http_client_get_status_code(client);
 
     char buf[1024];
     int total = 0;
@@ -103,37 +132,29 @@ esp_err_t PerformPost(const std::string& url,
 }
 
 // 后端全局响应拦截器把成功响应包成 {"success":true,"data":{...},"meta":{...}}。
-// 为兼容（同时兼容未来去掉包装），同一字段先查顶层、再查 data 内层。
+// 为兼容未来可能去掉包装的响应，同一字段先查顶层、再查 data 内层。
 // out_found = 是否在任意一层找到该字段（找不到时 out_value 不变）。
 void ReadResponseField(const std::string& body, const std::string& key,
                        std::string& out_value, bool& out_found) {
     out_found = false;
-    // 先尝试顶层（扁平响应）
-    std::map<std::string, std::string> top;
-    if (json_util::ParseFlatObject(body.c_str(), top)) {
-        auto it = top.find(key);
-        if (it != top.end()) {
-            out_value = it->second;
-            out_found = true;
-            return;
+    cJSON* root = cJSON_ParseWithLength(body.data(), body.size());
+    if (!cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    cJSON* value = cJSON_GetObjectItemCaseSensitive(root, key.c_str());
+    if (!cJSON_IsString(value)) {
+        cJSON* data = cJSON_GetObjectItemCaseSensitive(root, "data");
+        if (cJSON_IsObject(data)) {
+            value = cJSON_GetObjectItemCaseSensitive(data, key.c_str());
         }
     }
-    // 未命中：寻找 "data":{...} 内层再做扁平解析（后端 ResponseInterceptor 包装）
-    size_t pos = body.find("\"data\"");
-    if (pos != std::string::npos) {
-        size_t brace = body.find('{', pos + 6);
-        if (brace != std::string::npos) {
-            std::string inner = body.substr(brace);
-            std::map<std::string, std::string> nested;
-            if (json_util::ParseFlatObject(inner.c_str(), nested)) {
-                auto it = nested.find(key);
-                if (it != nested.end()) {
-                    out_value = it->second;
-                    out_found = true;
-                }
-            }
-        }
+    if (cJSON_IsString(value) && value->valuestring != nullptr) {
+        out_value = value->valuestring;
+        out_found = true;
     }
+    cJSON_Delete(root);
 }
 
 // SSE 行级解析器：Feed() 送入响应字节流，逐行触发回调。
@@ -232,8 +253,12 @@ bool AiClient::DoLogin() {
         return false;
     }
 
-    std::string payload = "{\"account\":" + json_util::Escape(account_) +
-                          ",\"password\":" + json_util::Escape(password_) + "}";
+    std::string payload;
+    if (!BuildJsonObject({{"account", account_}, {"password", password_}}, payload)) {
+        ESP_LOGE(TAG, "Failed to build login JSON");
+        DeviceLog::Log('E', "AiClient", "登录请求构造失败");
+        return false;
+    }
     HttpResponse resp;
     std::vector<std::string> headers{"Content-Type: application/json"};
     esp_err_t err = PerformPost(JoinUrl(backend_url_, "/api/auth/login"),
@@ -254,7 +279,8 @@ bool AiClient::DoLogin() {
     bool found = false;
     ReadResponseField(resp.body, "accessToken", token, found);
     if (!found || token.empty()) {
-        ESP_LOGE(TAG, "Login response missing accessToken: %s", resp.body.c_str());
+        ESP_LOGE(TAG, "Login response missing accessToken (body len=%u)",
+                 (unsigned)resp.body.size());
         DeviceLog::Log('E', "AiClient", "登录响应缺少 accessToken");
         return false;
     }
@@ -388,7 +414,12 @@ bool AiClient::DoChat(const std::string& text, const OnDeltaFn& on_delta,
         return false;
     }
 
-    std::string payload = "{\"content\":" + json_util::Escape(text) + "}";
+    std::string payload;
+    if (!BuildJsonObject({{"content", text}}, payload)) {
+        ESP_LOGE(TAG, "Failed to build chat JSON");
+        DeviceLog::Log('E', "AiClient", "Chat 请求构造失败");
+        return false;
+    }
     std::vector<std::string> headers{
         "Content-Type: application/json",
         "Authorization: Bearer " + access_token_,
@@ -426,7 +457,8 @@ bool AiClient::DoChat(const std::string& text, const OnDeltaFn& on_delta,
         esp_http_client_write(client, payload.data(), (int)payload.size());
     }
 
-    int status = esp_http_client_fetch_headers(client);
+    esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
     if (status == 401) {
         InvalidateToken();
         esp_http_client_close(client);
@@ -489,9 +521,13 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
     if (!Login()) {
         return false;
     }
-    std::string payload = "{\"text\":" + json_util::Escape(text) +
-                          ",\"voiceMode\":\"preset\",\"voice\":" +
-                          json_util::Escape(voice_) + "}";
+    std::string payload;
+    if (!BuildJsonObject({{"text", text}, {"voiceMode", "preset"},
+                          {"voice", voice_}}, payload)) {
+        ESP_LOGE(TAG, "Failed to build TTS JSON");
+        DeviceLog::Log('E', "AiClient", "TTS 请求构造失败");
+        return false;
+    }
     std::vector<std::string> headers{
         "Content-Type: application/json",
         "Authorization: Bearer " + access_token_,
@@ -529,7 +565,8 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
         esp_http_client_write(client, payload.data(), (int)payload.size());
     }
 
-    int status = esp_http_client_fetch_headers(client);
+    esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
     if (status == 401) {
         InvalidateToken();
         esp_http_client_close(client);
