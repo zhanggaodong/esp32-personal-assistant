@@ -36,11 +36,12 @@ void headless_main() {
     // 无屏语音状态机：初始化音频，启动录音/ASR/Chat/TTS 工作线程
     HeadlessVoiceController::Instance().Start();
 
+    // 先联网：WifiManager::Initialize 内部创建 esp_netif/tcpip 线程，
+    // WebServer::Start 依赖 lwIP（httpd），必须在其之后启动。
+    board.StartNetwork();
+
     // Web 配置服务器：配网 AP 占用 80 端口时后台重试，配网结束自动启动
     WebServer::Start();
-
-    // 异步联网：无已保存 Wi-Fi 自动进入热点配网
-    board.StartNetwork();
 
     ESP_LOGI(TAG, "Headless voice assistant running");
     while (true) {
