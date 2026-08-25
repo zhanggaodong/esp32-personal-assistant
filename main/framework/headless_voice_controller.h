@@ -42,9 +42,8 @@ private:
     void ProcessConversation(const std::vector<int16_t>& mic24k);
     void HandleAiFailure();
 
-    // 把 24kHz 麦克风数据重采样并按 ai.sample_rate 封装为 WAV
-    bool BuildWav(const std::vector<int16_t>& mic24k, int mic_rate, int target_rate,
-                  std::vector<uint8_t>& wav);
+    // 把已重采样到目标采样率（ai.sample_rate）的 PCM 封装为 16bit 单声道 WAV
+    bool BuildWav(const std::vector<int16_t>& pcm, int rate, std::vector<uint8_t>& wav);
 
     void SpeakPcm(const std::vector<int16_t>& pcm);
 
