@@ -9,6 +9,7 @@ enum class ConfigType {
     kImage,    // 图片（存 LittleFS）
     kEnum,     // 枚举，options 用 "|" 分隔
     kBool,     // 布尔，值 "0"/"1"
+    kPassword, // 密码：GET 掩码返回，PUT 收到掩码值表示"不修改原密码"
 };
 
 struct ConfigItem {

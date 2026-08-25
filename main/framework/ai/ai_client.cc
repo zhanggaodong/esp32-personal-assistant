@@ -167,12 +167,21 @@ AiClient& AiClient::Instance() {
 }
 
 void AiClient::UpdateConfig() {
+    std::lock_guard<std::mutex> lock(login_mutex_);
     ConfigStore& store = ConfigStore::Instance();
+    std::string old_url = backend_url_;
+    std::string old_account = account_;
+    std::string old_password = password_;
     backend_url_ = store.Get("ai.backend_url");
     account_ = store.Get("ai.account");
     password_ = store.Get("ai.password");
     voice_ = store.Get("ai.voice");
-    if (backend_url_.empty() || account_.empty() || password_.empty()) {
+    // 地址/账号/密码任一变化：立即清除旧 token，下一次对话使用新配置重新登录
+    if (old_url != backend_url_ || old_account != account_ ||
+        old_password != password_) {
+        InvalidateToken();
+    }
+    if (!IsConfigured()) {
         InvalidateToken();
     }
 }
@@ -220,10 +229,65 @@ bool AiClient::Login() {
     if (TokenAvailable()) {
         return true;
     }
+    // 并发登录锁：多个任务同时首次登录时只允许一个真正发请求
+    std::lock_guard<std::mutex> lock(login_mutex_);
+    if (TokenAvailable()) {
+        return true;  // 等待期间其它任务已完成登录
+    }
     return DoLogin();
 }
 
 bool AiClient::Transcribe(const std::vector<uint8_t>& wav, std::string& out_text) {
+    // 401 语义：清除 token → 重登 → 仅重试一次；再失败由调用方提示账号密码
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!Login()) {
+            return false;
+        }
+        if (DoTranscribe(wav, out_text)) {
+            return true;
+        }
+        if (TokenAvailable()) {
+            return false;  // 失败原因不是 401（token 仍在），不重试
+        }
+        ESP_LOGW(TAG, "transcribe got 401, re-login and retry once");
+    }
+    return false;
+}
+
+bool AiClient::Chat(const std::string& text, const OnDeltaFn& on_delta,
+                    std::string& out_conversation_id) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!Login()) {
+            return false;
+        }
+        if (DoChat(text, on_delta, out_conversation_id)) {
+            return true;
+        }
+        if (TokenAvailable()) {
+            return false;
+        }
+        ESP_LOGW(TAG, "chat got 401, re-login and retry once");
+    }
+    return false;
+}
+
+bool AiClient::Synthesize(const std::string& text, const OnAudioPcmFn& on_pcm) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!Login()) {
+            return false;
+        }
+        if (DoSynthesize(text, on_pcm)) {
+            return true;
+        }
+        if (TokenAvailable()) {
+            return false;
+        }
+        ESP_LOGW(TAG, "tts got 401, re-login and retry once");
+    }
+    return false;
+}
+
+bool AiClient::DoTranscribe(const std::vector<uint8_t>& wav, std::string& out_text) {
     if (!Login()) {
         return false;
     }
@@ -277,8 +341,8 @@ bool AiClient::Transcribe(const std::vector<uint8_t>& wav, std::string& out_text
     return true;
 }
 
-bool AiClient::Chat(const std::string& text, const OnDeltaFn& on_delta,
-                    std::string& out_conversation_id) {
+bool AiClient::DoChat(const std::string& text, const OnDeltaFn& on_delta,
+                      std::string& out_conversation_id) {
     if (!Login()) {
         return false;
     }
@@ -371,7 +435,7 @@ bool AiClient::Chat(const std::string& text, const OnDeltaFn& on_delta,
     return true;
 }
 
-bool AiClient::Synthesize(const std::string& text, const OnAudioPcmFn& on_pcm) {
+bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm) {
     if (!Login()) {
         return false;
     }

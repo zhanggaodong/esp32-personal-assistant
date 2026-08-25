@@ -159,13 +159,16 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
 
 void WifiBoard::StartWifiConfigMode() {
     in_config_mode_ = true;
+#ifndef CONFIG_APP_MODE_HEADLESS_VOICE
     // Transition to wifi configuring state
     Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
+#endif
 #ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
     auto& wifi_manager = WifiManager::GetInstance();
 
     wifi_manager.StartConfigAp();
 
+#ifndef CONFIG_APP_MODE_HEADLESS_VOICE
     // Show config prompt after a short delay
     Application::GetInstance().Schedule([&wifi_manager]() {
         std::string hint = Lang::Strings::CONNECT_TO_HOTSPOT;
@@ -176,12 +179,14 @@ void WifiBoard::StartWifiConfigMode() {
         Application::GetInstance().Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "gear", Lang::Sounds::OGG_WIFICONFIG);
     });
 #endif
-#if CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+#endif
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();
     // initialize esp-blufi protocol
     blufi.init();
 #endif
-#if CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
+#ifdef CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
+#ifndef CONFIG_APP_MODE_HEADLESS_VOICE
     // Start acoustic provisioning task
     auto codec = Board::GetInstance().GetAudioCodec();
     int channel = codec ? codec->input_channels() : 1;
@@ -195,11 +200,21 @@ void WifiBoard::StartWifiConfigMode() {
         audio_wifi_config::ReceiveWifiCredentialsFromAudio(&app, &wifi, disp, ch);
         vTaskDelete(NULL);
     }, "acoustic_wifi", 4096, reinterpret_cast<void*>(channel), 2, NULL);
+#else
+    ESP_LOGW(TAG, "acoustic provisioning not supported in headless mode");
+#endif
 #endif
 }
 
 void WifiBoard::EnterWifiConfigMode() {
     ESP_LOGI(TAG, "EnterWifiConfigMode called");
+#ifdef CONFIG_APP_MODE_HEADLESS_VOICE
+    // 无屏模式：不依赖 Application/Display，直接停站并进入热点配网。
+    // 进入/退出/连接事件经 network_event_callback_ 交给无屏控制器播报。
+    esp_timer_stop(connect_timer_);
+    WifiManager::GetInstance().StopStation();
+    StartWifiConfigMode();
+#else
     GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
 
     auto& app = Application::GetInstance();
@@ -237,6 +252,7 @@ void WifiBoard::EnterWifiConfigMode() {
     WifiManager::GetInstance().StopStation();
 
     StartWifiConfigMode();
+#endif
 }
 
 bool WifiBoard::IsInWifiConfigMode() const {

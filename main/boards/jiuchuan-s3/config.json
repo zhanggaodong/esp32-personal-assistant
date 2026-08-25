@@ -6,6 +6,12 @@
             "sdkconfig_append": [
                 "CONFIG_APP_MODE_FRAMEWORK=y"
             ]
+        },
+        {
+            "name": "jiuchuan-s3-headless",
+            "sdkconfig_append": [
+                "CONFIG_APP_MODE_HEADLESS_VOICE=y"
+            ]
         }
     ]
 }

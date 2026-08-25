@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,9 @@
 //   - POST /api/asr/transcribe         multipart(audio=wav) -> {text}
 //   - POST /api/chat/device            SSE: data:{"text":"增量"} / event:done
 //   - POST /api/tts/synthesize/stream  SSE: metadata / audio{audioBase64} / done
+//
+// 401 语义：任一接口返回 401 时清除 token → 重新登录一次 → 仅重试当前阶段
+// 一次；再次失败则由调用方提示用户检查账号密码（不会死循环）。
 class AiClient {
 public:
     using OnDeltaFn = std::function<void(const char* delta)>;
@@ -20,10 +24,16 @@ public:
 
     static AiClient& Instance();
 
-    // 从 ConfigStore 刷新后端地址/账号/密码/音色（配置变更后调用）
+    // 从 ConfigStore 刷新后端地址/账号/密码/音色（配置变更后调用）。
+    // 地址/账号/密码任一变化都会使内存中的旧 token 立即失效。
     void UpdateConfig();
 
-    // 登录拿 JWT（token 已存在且仍在用时立即返回 true）
+    // 后端配置（地址+账号+密码）是否完整，用于无屏按键前的"未配置"判断
+    bool IsConfigured() const {
+        return !backend_url_.empty() && !account_.empty() && !password_.empty();
+    }
+
+    // 登录拿 JWT（token 已存在且仍在用时立即返回 true；并发登录已加锁）
     bool Login();
 
     bool TokenAvailable() const { return !access_token_.empty(); }
@@ -45,6 +55,11 @@ private:
     bool DoLogin();
     void InvalidateToken() { access_token_.clear(); }
 
+    bool DoTranscribe(const std::vector<uint8_t>& wav, std::string& out_text);
+    bool DoChat(const std::string& text, const OnDeltaFn& on_delta,
+                std::string& out_conversation_id);
+    bool DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm);
+
     // 底层 HTTP POST。返回取到的整段响应体（非 SSE）到 out_body。
     bool httpPostJson(const std::string& path, const std::string& json_body,
                       std::string& out_status_err, std::string& code_body_or_err);
@@ -54,4 +69,5 @@ private:
     std::string password_;
     std::string voice_;
     std::string access_token_;
+    std::mutex login_mutex_;  // 登录并发锁（仅保护 access_token_ 的获取）
 };

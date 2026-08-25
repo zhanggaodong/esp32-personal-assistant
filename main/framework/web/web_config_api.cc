@@ -13,9 +13,37 @@
 #include "json_util.h"
 #include "web_ui_page.h"
 
+#ifdef CONFIG_APP_MODE_HEADLESS_VOICE
+#include <wifi_manager.h>
+#endif
+
 #define TAG "ConfigApi"
 
 namespace {
+
+// 密码掩码：GET 不返回明文；PUT 收到该值视为"不修改原密码"
+constexpr const char* PASSWORD_MASK = "********";
+constexpr const char* PASSWORD_KEY = "ai.password";
+
+bool IsPasswordKey(const char* key) {
+    return key != nullptr && strcmp(key, PASSWORD_KEY) == 0;
+}
+
+// 校验后端地址：只允许 http/https，限制长度，拒绝控制字符
+bool ValidateBackendUrl(const std::string& url) {
+    if (url.size() > 256 || url.empty()) {
+        return false;
+    }
+    if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0) {
+        return false;
+    }
+    for (char c : url) {
+        if ((unsigned char)c < 0x20 || (unsigned char)c == 0x7f) {
+            return false;
+        }
+    }
+    return true;
+}
 
 void SendJson(httpd_req_t* req, const std::string& body, const char* status = HTTPD_200) {
     httpd_resp_set_status(req, status);
@@ -46,14 +74,18 @@ std::string BuildConfigJson() {
     }
     schema += "]";
 
-    // values 对象
+    // values 对象（密码类配置以掩码返回，不暴露明文）
     std::string values = "{";
     for (int i = 0; i < kConfigSchemaSize; ++i) {
         if (i > 0) {
             values += ",";
         }
-        std::string v = store.Get(kConfigSchema[i].key);
-        values += "\"" + json_util::Escape(kConfigSchema[i].key) + "\":\"" + json_util::Escape(v) + "\"";
+        const ConfigItem& it = kConfigSchema[i];
+        std::string v = store.Get(it.key);
+        if (it.type == ConfigType::kPassword && !v.empty()) {
+            v = PASSWORD_MASK;
+        }
+        values += "\"" + json_util::Escape(it.key) + "\":\"" + json_util::Escape(v) + "\"";
     }
     values += "}";
 
@@ -98,6 +130,16 @@ esp_err_t HandlePutConfig(httpd_req_t* req) {
 
     auto& store = ConfigStore::Instance();
     for (const auto& kv : updates) {
+        // 掩码密码：表示"不修改原密码"，跳过写入
+        if (IsPasswordKey(kv.first.c_str()) && kv.second == PASSWORD_MASK) {
+            continue;
+        }
+        // 后端地址安全校验：仅 http/https、限长、拒绝控制字符
+        if (strcmp(kv.first.c_str(), "ai.backend_url") == 0 &&
+            !ValidateBackendUrl(kv.second)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid backend_url");
+            return ESP_FAIL;
+        }
         store.Set(kv.first.c_str(), kv.second.c_str());
     }
     SendJson(req, "{\"ok\":true,\"updated\":" + std::to_string(updates.size()) + "}");
@@ -105,11 +147,22 @@ esp_err_t HandlePutConfig(httpd_req_t* req) {
 }
 
 esp_err_t HandleGetStatus(httpd_req_t* req) {
+#ifdef CONFIG_APP_MODE_HEADLESS_VOICE
+    auto& board = Board::GetInstance();
+    auto& wifi = WifiManager::GetInstance();
+    std::string out = "{\"ok\":true,\"device\":\"" + json_util::Escape(board.GetBoardType()) +
+                      "\",\"mode\":\"headless\",\"wifi\":\"" +
+                      std::string(wifi.IsConnected() ? "connected" : "disconnected") +
+                      "\",\"ip\":\"" + json_util::Escape(wifi.GetIpAddress()) + "\"}";
+    SendJson(req, out);
+    return ESP_OK;
+#else
     std::string app = AppManager::Instance().CurrentId();
     std::string out = "{\"ok\":true,\"device\":\"" + json_util::Escape(Board::GetInstance().GetBoardType()) +
                       "\",\"mode\":\"framework\",\"app\":\"" + json_util::Escape(app) + "\"}";
     SendJson(req, out);
     return ESP_OK;
+#endif
 }
 
 // 解析 /api/upload?name=xxx.jpg 中的文件名参数

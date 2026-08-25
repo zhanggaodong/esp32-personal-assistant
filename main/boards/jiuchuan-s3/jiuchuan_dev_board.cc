@@ -25,6 +25,11 @@
 #include "input/input_router.h"
 #endif
 
+#ifdef CONFIG_APP_MODE_HEADLESS_VOICE
+#include "framework/headless_led_controller.h"
+#include "framework/headless_voice_controller.h"
+#endif
+
 #define BOARD_TAG "JiuchuanDevBoard"
 #define __USER_GPIO_PWRDOWN__
 
@@ -77,8 +82,9 @@ private:
     // 框架模式下板级浅睡计时器永久禁用：息屏进入/退出由 Framework 的
     // AppManager + Screensaver 屏统一管理（网页可配 timeout/keep_on_sec），
     // 避免 60s 时板级同时压背光导致"切了时钟画面实际一片黑"的双重冲突。
+    // 无屏模式下同样禁用：无屏幕可息屏，且电源键已改作 PTT，不能再用于浅睡。
     void SetPowerSaveTimerEnabled(bool enabled) {
-#ifdef CONFIG_APP_MODE_FRAMEWORK
+#if defined(CONFIG_APP_MODE_FRAMEWORK) || defined(CONFIG_APP_MODE_HEADLESS_VOICE)
         (void)enabled;
         return;
 #else
@@ -89,9 +95,11 @@ private:
     }
 
     // 统一唤醒：框架模式直接恢复显示与背光（返回主页由 AppManager::NotifyInput 处理），
-    // 传统模式走板级 PowerSaveTimer::WakeUp()。所有唤醒入口统一经此函数。
+    // 传统模式走板级 PowerSaveTimer::WakeUp()。无屏模式无显示，唤醒为 no-op。
     void WakeUpScreen() {
-#ifdef CONFIG_APP_MODE_FRAMEWORK
+#ifdef CONFIG_APP_MODE_HEADLESS_VOICE
+        return;
+#elif defined(CONFIG_APP_MODE_FRAMEWORK)
         if (display_ != nullptr) {
             display_->SetPowerSaveMode(false);
         }
@@ -114,6 +122,12 @@ private:
     }
 
     void InitializePowerSaveTimer() {
+#ifdef CONFIG_APP_MODE_HEADLESS_VOICE
+        // 无屏语音模式：电源键是 PTT 说话键，移除板级浅睡/深睡关机逻辑，
+        // 不创建电源计时器，避免意外息屏或关机打断对话。
+        power_save_timer_ = nullptr;
+        return;
+#else
         #ifndef __USER_GPIO_PWRDOWN__
         RTC_DATA_ATTR static bool long_press_occurred = false;
         esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
@@ -330,7 +344,46 @@ private:
             });
     }
 
-        void InitializeGC9301isplay()
+        #ifdef CONFIG_APP_MODE_HEADLESS_VOICE
+    // 无屏语音模式按键：电源键 = PTT（按住说话/松开提交），不使用单击/长按/
+    // 三击（三击原先用于重置 WiFi，改由 BOOT 键承担配网入口）。
+    // BOOT 键 = 重新配网；WIFI/CMD 键 = 音量 ±（无屏幕提示，仅串口日志）。
+    void InitializeHeadlessButtons() {
+        GpioManager::Config(GPIO_NUM_3, GpioManager::GpioMode::INPUT_PULLDOWN);
+
+        pwr_button_.OnPressDown([]() {
+            ESP_LOGI(BOARD_TAG, "PTT pressed");
+            HeadlessVoiceController::Instance().OnPttPressed();
+        });
+        pwr_button_.OnPressUp([]() {
+            ESP_LOGI(BOARD_TAG, "PTT released");
+            HeadlessVoiceController::Instance().OnPttReleased();
+        });
+
+        // 重新配网：停止当前连接并进入热点配网
+        boot_button_.OnClick([this]() {
+            ESP_LOGI(BOARD_TAG, "Boot button: re-enter wifi config mode");
+            EnterWifiConfigMode();
+        });
+
+        wifi_button.OnPressDown([this]() { AdjustVolumeNoDisplay(true); });
+        cmd_button.OnPressDown([this]() { AdjustVolumeNoDisplay(false); });
+    }
+
+    void AdjustVolumeNoDisplay(bool up) {
+        auto codec = GetAudioCodec();
+        if (codec == nullptr) {
+            return;
+        }
+        int current_vol = codec->output_volume();
+        current_vol = up ? (current_vol + 8 > 80 ? 80 : current_vol + 8)
+                         : (current_vol - 8 < 0 ? 0 : current_vol - 8);
+        codec->SetOutputVolume(current_vol);
+        ESP_LOGI(BOARD_TAG, "Volume %s -> %d", up ? "up" : "down", current_vol);
+    }
+#endif
+
+    void InitializeGC9301isplay()
         {
             // 液晶屏控制IO初始化
             ESP_LOGI(TAG, "test Install panel IO");
@@ -381,11 +434,18 @@ public:
 
         InitializeI2c();
         InitializePowerManager();
+#ifdef CONFIG_APP_MODE_HEADLESS_VOICE
+        // 无屏语音模式：不初始化 GC9309/LVGL/背光/深睡，只启动音频、
+        // Wi-Fi(基类)、按键(PTT/音量/BOOT配网) 与 RGB 指示灯。
+        InitializePowerSaveTimer();  // headless 内为 no-op
+        InitializeHeadlessButtons();
+        HeadlessLedController::Instance().Init(BUILTIN_LED_GPIO);
+#else
         InitializePowerSaveTimer();
         InitializeButtons();
         InitializeGC9301isplay();
         GetBacklight()->RestoreBrightness();
-
+#endif
     }
 
     virtual Led* GetLed() override {

@@ -10,7 +10,7 @@
 #include "application.h"
 #include "system_info.h"
 
-#ifdef CONFIG_APP_MODE_FRAMEWORK
+#if defined(CONFIG_APP_MODE_FRAMEWORK) || defined(CONFIG_APP_MODE_HEADLESS_VOICE)
 #include "framework/framework_main.h"
 #endif
 
@@ -30,6 +30,9 @@ extern "C" void app_main(void)
 #ifdef CONFIG_APP_MODE_FRAMEWORK
     // Personal Assistant Framework 独立入口
     framework_main();
+#elif defined(CONFIG_APP_MODE_HEADLESS_VOICE)
+    // 无屏按键语音助手独立入口（不初始化 LCD/LVGL）
+    headless_main();
 #else
     // 原始小智 AI 语音助手
     // Initialize and run the application

@@ -724,6 +724,20 @@ endif()
 
 file(GLOB COMMON_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/*.ogg)
 
+# Headless voice assistant 模块（CONFIG_APP_MODE_HEADLESS_VOICE：无屏按键语音助手）
+if(CONFIG_APP_MODE_HEADLESS_VOICE)
+    list(APPEND SOURCES
+        "framework/headless_main.cc"
+        "framework/headless_voice_controller.cc"
+        "framework/headless_led_controller.cc"
+        "framework/headless_network_controller.cc"
+        "framework/audio_prompt_player.cc"
+    )
+endif()
+
+# 无屏本地提示音（WAV，配网/错误等无网络场景；播放器见 audio_prompt_player.cc）
+file(GLOB PROMPT_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/prompts/*.wav)
+
 # If target chip is ESP32, exclude specific files to avoid build errors
 if(CONFIG_IDF_TARGET_ESP32)
     list(REMOVE_ITEM SOURCES "audio/codecs/box_audio_codec.cc"
@@ -737,7 +751,7 @@ if(CONFIG_IDF_TARGET_ESP32)
 endif()
 
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${PROMPT_SOUNDS}
                                 "display/lvgl_display/font_custom_20_4.bin"
                                 "display/lvgl_display/font_custom_80_4.bin"
                     INCLUDE_DIRS ${INCLUDE_DIRS}

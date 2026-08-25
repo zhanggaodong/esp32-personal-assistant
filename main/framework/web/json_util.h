@@ -97,6 +97,7 @@ inline std::string TypeName(int type) {
         case 4: return "image";
         case 5: return "enum";
         case 6: return "bool";
+        case 7: return "password";
         default: return "string";
     }
 }

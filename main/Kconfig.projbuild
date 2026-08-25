@@ -13,12 +13,16 @@ choice APP_MODE
         Select the application run mode.
         Xiaozhi Assistant: 原始小智 AI 语音助手。
         Personal Assistant Framework: 可扩展桌面助手框架（AI 对话为可选模块）。
+        Headless Voice Assistant: 无屏幕按键语音助手（按住电源键说话，松开由服务端识别并播报）。
 
     config APP_MODE_XIAOZHI
         bool "Xiaozhi Assistant (original)"
 
     config APP_MODE_FRAMEWORK
         bool "Personal Assistant Framework"
+
+    config APP_MODE_HEADLESS_VOICE
+        bool "Headless Voice Assistant (无屏按键语音助手)"
 endchoice
 
 choice

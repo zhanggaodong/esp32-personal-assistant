@@ -2,6 +2,22 @@
 
 #include <string.h>
 
+#ifdef CONFIG_APP_MODE_HEADLESS_VOICE
+
+// 无屏语音助手只保留 AI 服务配置：后端地址、账号、密码、音色、采样率。
+// 不再有标题/壁纸/字体/息屏/菜单/按键映射等屏幕相关项；
+// ai.enabled 由"地址+账号+密码是否完整"隐式决定。
+const ConfigItem kConfigSchema[] = {
+    {"ai.backend_url", "后端地址 http(s)://ip:port", ConfigType::kString, "", nullptr, "AI服务"},
+    {"ai.account", "后端账号(邮箱/手机号)", ConfigType::kString, "", nullptr, "AI服务"},
+    {"ai.password", "后端密码", ConfigType::kPassword, "", nullptr, "AI服务"},
+    {"ai.voice", "朗读音色", ConfigType::kEnum, "mimo_default",
+     "mimo_default|冰糖|茉莉|苏打|白桦|Mia|Chloe|Milo|Dean", "AI服务"},
+    {"ai.sample_rate", "录音采样率", ConfigType::kEnum, "16000", "8000|16000", "AI服务"},
+};
+
+#else  // 屏幕版（Framework / 原始小智回退构建）
+
 // 初始 Schema。每新增一个可配置项，就在此加一行：自动出现在网页表单。
 const ConfigItem kConfigSchema[] = {
     // 分组：通用
@@ -51,6 +67,8 @@ const ConfigItem kConfigSchema[] = {
      "mimo_default|冰糖|茉莉|苏打|白桦|Mia|Chloe|Milo|Dean", "AI对话"},
     {"ai.sample_rate", "录音采样率", ConfigType::kEnum, "16000", "8000|16000", "AI对话"},
 };
+
+#endif  // CONFIG_APP_MODE_HEADLESS_VOICE
 
 const int kConfigSchemaSize = sizeof(kConfigSchema) / sizeof(kConfigSchema[0]);
 
