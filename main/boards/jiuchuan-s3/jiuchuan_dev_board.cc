@@ -186,7 +186,8 @@ private:
             #endif
         });
         power_save_timer_->SetEnabled(true);
-#endif
+#endif  // CONFIG_APP_MODE_FRAMEWORK
+#endif  // CONFIG_APP_MODE_HEADLESS_VOICE
     }
 
     void InitializeI2c() {
