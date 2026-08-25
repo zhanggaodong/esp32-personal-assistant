@@ -1,5 +1,6 @@
 tmp/
-components/
+components/*
+!components/78__esp-wifi-connect/
 managed_components/
 build/
 .vscode/

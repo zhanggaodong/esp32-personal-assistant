@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WiFi Configuration</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #f4f5f7;
+            font-family: system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+            color:#222;
+        }
+        .page-header{background:#1f6feb;color:#fff;padding:14px 18px;font-size:18px;font-weight:600}
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 80vh;
+            max-width:720px;
+            margin:16px auto;
+            padding:20px;
+            box-sizing: border-box;
+        }
+        .card{background:#fff;border:1px solid #e3e5e8;border-radius:8px;padding:40px 32px;text-align:center;width:100%;max-width:420px}
+        .checkmark {
+            width: 90px;
+            height: 90px;
+            margin-bottom: 20px;
+        }
+        .message {
+            text-align: center;
+            font-size: 18px;
+            margin-bottom: 20px;
+        }
+        .message p{margin:6px 0}
+        .message p:first-child{font-weight:600;font-size:20px}
+    </style>
+</head>
+<body>
+    <div class="page-header">Wi-Fi 配置</div>
+    <div class="container">
+        <div class="card">
+            <svg class="checkmark" viewBox="0 0 52 52">
+                <circle class="checkmark__circle" cx="26" cy="26" r="25" fill="none" stroke="#4CAF50" stroke-width="2"/>
+                <path class="checkmark__check" fill="none" stroke="#4CAF50" stroke-width="2" d="M14.1 27.2l7.1 7.2 16.7-16.8"/>
+            </svg>
+            
+            <div class="message">
+                <p>配置成功！</p>
+                <p>Configuration successful!</p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        window.addEventListener('load', function() {
+            // Send exit request after a short delay
+            setTimeout(function() {
+                fetch('/exit', {
+                    method: 'POST'
+                })
+                .then(response => {
+                    if (response.ok) {
+                        console.log('Exit config mode request sent');
+                    } else {
+                        console.error('Failed to send exit request');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                });
+            }, 1000);
+        });
+    </script>
+</body>
+</html>
