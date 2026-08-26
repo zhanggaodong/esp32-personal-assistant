@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <string.h>
 
 #include <esp_log.h>
+#include <esp_timer.h>
 
 #include "board.h"
 #include "audio/audio_codec.h"
@@ -20,14 +22,27 @@
 
 namespace {
 
-// 录音时长边界：最短 200ms，最长 8s（达到上限自动按"松开"路径提交）
+// 录音时长边界（legacy）：最短 200ms，最长 8s（达到上限自动按"松开"路径提交）
 constexpr size_t kMinRecordMs = 200;
-constexpr size_t kMaxRecordMs = 8000;
+constexpr size_t kLegacyMaxRecordMs = 8000;
 
 // 单次麦克风读取块（采样点，20ms @24kHz）
 constexpr size_t kMicChunkSamples = 480;
 
-// 线性重采样：src(采样率 src_rate) -> out(dst_rate)。
+// 流式路径一帧 = 100ms @16kHz = 1600 采样点（16bit/单声道 = 3200 字节）
+constexpr size_t kFrameSamples16k = 1600;
+
+// 等待 turn.done 的看门狗上限（超过则强制结束本轮）
+constexpr uint64_t kTurnDeadlineMs = 120000;
+
+// 播放出队块：80ms @24kHz
+constexpr size_t kPlaybackChunkSamples = 1920;
+
+int64_t NowMs() {
+    return esp_timer_get_time() / 1000;
+}
+
+// 线性重采样（only legacy）：src(采样率 src_rate) -> out(dst_rate)。
 void Resample(const std::vector<int16_t>& src, int src_rate, int dst_rate,
               std::vector<int16_t>& out) {
     out.clear();
@@ -63,6 +78,10 @@ HeadlessVoiceController& HeadlessVoiceController::Instance() {
     return instance;
 }
 
+bool HeadlessVoiceController::UseStream() const {
+    return ConfigStore::Instance().Get("ai.voice_protocol") == "stream_v1";
+}
+
 void HeadlessVoiceController::Start() {
     auto& board = Board::GetInstance();
     auto* codec = board.GetAudioCodec();
@@ -79,13 +98,37 @@ void HeadlessVoiceController::Start() {
         return speaking_.load() || ptt_held_.load();
     });
     AiClient::Instance().UpdateConfig();
+    DeviceVoiceClient::Instance().UpdateConfig();
 
-    // 配置变更（ai.*）即时刷新登录参数；地址/账号/密码变化会让旧 token 失效
+    // 配置变更（ai.*）即时刷新登录参数与语言客户端会话；
+    // 地址/账号/密码变化会让旧 token 失效，VoiceClient 的旧 WebSocket 一并作废。
     EventBus::Instance().Subscribe(kEventConfigChanged, [](int32_t, void* data) {
         if (data == nullptr || strstr(static_cast<const char*>(data), "ai.") != nullptr) {
             AiClient::Instance().UpdateConfig();
+            DeviceVoiceClient::Instance().UpdateConfig();
         }
     });
+
+    if (UseStream()) {
+        DeviceVoiceClient& vc = DeviceVoiceClient::Instance();
+        vc.SetPcmCallback([this](uint32_t turn_id, uint32_t sequence, bool first,
+                                 bool last, const int16_t* pcm, size_t count) {
+            OnPcm(turn_id, sequence, first, last, pcm, count);
+        });
+        vc.SetEventCallback([this](const voice::ServerMessage& msg) { OnEvent(msg); });
+        vc.SetDisconnectedCallback([this](const char* reason) { OnDisconnected(reason); });
+
+        event_queue_ = xQueueCreate(16, sizeof(Event));
+        if (event_queue_ == nullptr) {
+            ESP_LOGE(TAG, "failed to create event queue");
+            return;
+        }
+        if (xTaskCreate(PlaybackTask, "headless_playback", 4096, this, 4,
+                        &playback_task_) != pdPASS) {
+            ESP_LOGE(TAG, "failed to create playback task");
+            playback_task_ = nullptr;
+        }
+    }
 
     state_ = State::kWaitWifi;
     booted_ = true;
@@ -96,12 +139,23 @@ void HeadlessVoiceController::Start() {
     ESP_LOGI(TAG, "headless voice started (PTT: press=record, release=submit)");
 }
 
+// ---------------------------------------------------------------------------
+// 按键回调（iot_button 线程，非阻塞，只投递事件/标记）
+// ---------------------------------------------------------------------------
+
 void HeadlessVoiceController::OnPttPressed() {
     if (!booted_.load()) {
         return;  // 启动阶段忽略
     }
-    // 一轮回答（录音/ASR/Chat/TTS/播报）尚未结束：忽略本次按键并短提示，
-    // 不允许并发录音、并发 HTTP 或打断正在播放的 PCM（提示音自身会让路）。
+    if (UseStream()) {
+        ptt_held_.store(true);
+        Event e = Event::kPress;
+        if (event_queue_ != nullptr) {
+            xQueueSend(event_queue_, &e, 0);
+        }
+        return;
+    }
+    // legacy：一轮回答（录音/ASR/Chat/TTS/播报）尚未结束：忽略并短提示
     if (conversation_active_.load()) {
         AudioPromptPlayer::Instance().Play(AudioPromptPlayer::Prompt::kWaitAnswer);
         ptt_held_ = false;
@@ -114,8 +168,16 @@ void HeadlessVoiceController::OnPttPressed() {
 }
 
 void HeadlessVoiceController::OnPttReleased() {
-    ptt_held_ = false;  // 工作线程据此停止采集并提交
+    ptt_held_.store(false);  // 录音循环据此停止采集；流式路径由状态机感知
+    if (UseStream() && event_queue_ != nullptr) {
+        Event e = Event::kRelease;
+        xQueueSend(event_queue_, &e, 0);
+    }
 }
+
+// ---------------------------------------------------------------------------
+// 工作线程：legacy 阻塞编排 / stream_v1 事件状态机
+// ---------------------------------------------------------------------------
 
 void HeadlessVoiceController::WorkerTask(void* arg) {
     static_cast<HeadlessVoiceController*>(arg)->WorkerLoop();
@@ -124,27 +186,387 @@ void HeadlessVoiceController::WorkerTask(void* arg) {
 
 void HeadlessVoiceController::WorkerLoop() {
     for (;;) {
-        // 等待"电源键按下"通知（松开由录音循环直接感知 ptt_held_）
-        if (ulTaskNotifyTake(pdFALSE, portMAX_DELAY) == 0) {
+        if (!UseStream()) {
+            // legacy：等待"电源键按下"通知
+            if (ulTaskNotifyTake(pdFALSE, portMAX_DELAY) == 0) {
+                continue;
+            }
+            HandlePressLegacy();
             continue;
         }
-        HandlePress();
+        if (event_queue_ == nullptr) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        // stream：等事件；等待回复态使用短超时喂看门狗
+        Event e;
+        bool in_wait_state = (state_ == State::kWaitingAsr || state_ == State::kStreamingReply ||
+                              state_ == State::kSpeaking || state_ == State::kCancelling);
+        TickType_t wait = in_wait_state ? pdMS_TO_TICKS(200) : portMAX_DELAY;
+        if (xQueueReceive(event_queue_, &e, wait) != pdTRUE) {
+            if (in_wait_state && NowMs() >= (int64_t)turn_deadline_ms_) {
+                ESP_LOGE(TAG, "turn timeout waiting turn.done, forcing end");
+                CancelActiveTurn();
+                HandleTurnEnd(false);
+            }
+            continue;
+        }
+        HandleEvent(e);
     }
 }
 
-void HeadlessVoiceController::HandlePress() {
+void HeadlessVoiceController::HandleEvent(Event e) {
+    switch (state_) {
+        case State::kReady:
+            if (e == Event::kPress) {
+                HandlePressStream();  // 内部同步完成一轮（录音→等回复→播完）
+            }
+            break;
+        case State::kWaitingAsr:
+        case State::kStreamingReply:
+        case State::kSpeaking:
+            if (e == Event::kPress) {
+                // 插话：取消旧轮并立即开始新一轮（由 BeginRecording 内部处理）
+                HandlePressStream();
+            } else if (e == Event::kTurnDone) {
+                // conversationId 与 EOS 已在 OnEvent 中设置/标记，等待播放排空
+                turn_deadline_ms_ = NowMs() + kTurnDeadlineMs;
+            } else if (e == Event::kTurnError) {
+                HandleTurnEnd(false);
+            } else if (e == Event::kDisconnected) {
+                CancelActiveTurn();
+                HandleTurnEnd(false);
+            } else if (e == Event::kPlaybackEnd) {
+                HandleTurnEnd(true);
+            }
+            break;
+        case State::kRecording:
+        case State::kBoot:
+        case State::kWaitWifi:
+        case State::kCancelling:
+        case State::kProcessing:
+            break;  // 录音在 BeginRecording 内同步进行；其余事件忽略
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 流式路径
+// ---------------------------------------------------------------------------
+
+void HeadlessVoiceController::HandlePressStream() {
+    auto& prompt = AudioPromptPlayer::Instance();
+    auto& net = HeadlessNetworkController::Instance();
+    auto& led = HeadlessLedController::Instance();
+
+    // 前置：联网且不在配网；配置完整
+    if (!net.IsConnected() || net.IsProvisioning()) {
+        led.ShowError();
+        prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
+        led.ShowReady();
+        return;
+    }
+    if (!AiConfigComplete()) {
+        led.ShowError();
+        prompt.Play(AudioPromptPlayer::Prompt::kNeedServiceConfig);
+        led.ShowReady();
+        return;
+    }
+    BeginRecording();  // 状态迁移在内部完成
+}
+
+void HeadlessVoiceController::BeginRecording() {
+    auto& led = HeadlessLedController::Instance();
+    auto& prompt = AudioPromptPlayer::Instance();
+    auto* codec = Board::GetInstance().GetAudioCodec();
+    if (codec == nullptr) {
+        led.ShowError();
+        prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
+        led.ShowReady();
+        return;
+    }
+
+    // 插话：先停旧轮（cancel + 关输出 + 清播放队列），再开新麦
+    if (state_ == State::kWaitingAsr || state_ == State::kStreamingReply ||
+        state_ == State::kSpeaking) {
+        CancelActiveTurn();
+    }
+
+    DeviceVoiceClient& vc = DeviceVoiceClient::Instance();
+    if (!vc.EnsureConnected()) {
+        ESP_LOGE(TAG, "voice websocket connect failed");
+        led.ShowError();
+        prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
+        state_ = State::kReady;
+        conversation_active_.store(false);
+        led.ShowReady();
+        return;
+    }
+
+    current_turn_id_ = next_turn_id_++;
+    conversation_active_.store(true);
+    led.ShowRecording();
+
+    timeline_.Reset(0);
+    DiagMark(voice_diag::Stage::kRecording, "ptt_down");
+
+    std::string conv;
+    {
+        std::lock_guard<std::mutex> lk(conv_mutex_);
+        conv = conversation_id_;
+    }
+    std::string voice = ConfigStore::Instance().Get("ai.voice");
+    if (voice.empty()) {
+        voice = "mimo_default";
+    }
+    int max_rec = ConfigStore::Instance().GetInt("ai.max_record_seconds", 30);
+    max_rec = std::max(15, std::min(60, max_rec));  // 固件硬上限 60s
+
+    if (!vc.StartTurn(current_turn_id_, conv, voice, "zh-CN", (uint32_t)max_rec)) {
+        ESP_LOGE(TAG, "turn.start failed");
+        led.ShowError();
+        prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
+        state_ = State::kReady;
+        conversation_active_.store(false);
+        led.ShowReady();
+        return;
+    }
+
+    // —— 录音与上行 ——
+    codec->EnableInput(true);
+    state_ = State::kRecording;
+
+    resampler_.Configure((size_t)codec->input_sample_rate(), 16000);
+    resampler_.Reset();
+    frame_buf_.clear();
+    resample_buf_.clear();
+    turn_seq_ = 0;
+    rec_start_ms_ = (uint64_t)NowMs();
+    const size_t mic_rate = (size_t)codec->input_sample_rate();
+    const size_t chunk_samples = mic_rate / 50;  // 20ms
+    const uint64_t max_ms = (uint64_t)max_rec * 1000;
+    std::vector<int16_t> chunk(chunk_samples, 0);
+    std::vector<int16_t> out;
+    bool mic_err = false;
+    bool sent_any = false;
+
+    while (ptt_held_.load()) {
+        if (((uint64_t)NowMs() - rec_start_ms_) >= max_ms) {
+            break;  // 达到配置上限，自动走"松开"路径
+        }
+        chunk.assign(chunk_samples, 0);
+        if (!codec->InputData(chunk)) {
+            mic_err = true;
+            break;
+        }
+        resampler_.Process(chunk.data(), chunk.size(), out);
+        frame_buf_.insert(frame_buf_.end(), out.begin(), out.end());
+        out.clear();
+        // 每满一帧（1600 样本）立即上行
+        while (frame_buf_.size() >= kFrameSamples16k) {
+            if (!vc.SendInputPcm(current_turn_id_, turn_seq_++, !sent_any, false,
+                                 frame_buf_.data(), kFrameSamples16k)) {
+                mic_err = true;  // WebSocket 断开：SendInputPcm 失败
+                goto capture_done;
+            }
+            sent_any = true;
+            frame_buf_.erase(frame_buf_.begin(), frame_buf_.begin() + kFrameSamples16k);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+capture_done:
+    codec->EnableInput(false);
+    const uint64_t elapsed_ms = (uint64_t)NowMs() - rec_start_ms_;
+
+    if (mic_err || (!sent_any && frame_buf_.empty())) {
+        // 输入异常 / 空数据 / 网络中断：丢弃本轮
+        ESP_LOGE(TAG, "mic error or uplink failure");
+        vc.CancelTurn(current_turn_id_, "capture_error");
+        led.ShowError();
+        state_ = State::kReady;
+        conversation_active_.store(false);
+        led.ShowReady();
+        timeline_.Log(TAG);
+        return;
+    }
+    if (elapsed_ms < kMinRecordMs) {
+        ESP_LOGW(TAG, "recording too short: %u ms", (unsigned)elapsed_ms);
+        vc.CancelTurn(current_turn_id_, "too_short");
+        prompt.Play(AudioPromptPlayer::Prompt::kNoSpeech);
+        led.ShowError();
+        state_ = State::kReady;
+        conversation_active_.store(false);
+        led.ShowReady();
+        return;
+    }
+    // 尾帧：不足一帧的剩余做最后一片（last=true）；恰好对齐则无尾帧，靠 turn.stop 收尾
+    if (!frame_buf_.empty()) {
+        vc.SendInputPcm(current_turn_id_, turn_seq_++, !sent_any, true,
+                        frame_buf_.data(), frame_buf_.size());
+    }
+    vc.StopTurn(current_turn_id_);
+    DiagMark(voice_diag::Stage::kRecording, "ptt_up");
+
+    // 等待后端校验/首字并并行播放
+    first_chat_delta_logged_ = false;
+    turn_deadline_ms_ = NowMs() + kTurnDeadlineMs;
+    state_ = State::kWaitingAsr;
+    led.ShowProcessing();
+}
+
+void HeadlessVoiceController::CancelActiveTurn() {
+    auto& vc = DeviceVoiceClient::Instance();
+    if (current_turn_id_ != 0) {
+        vc.CancelTurn(current_turn_id_, "barge_in");
+    }
+    auto* codec = Board::GetInstance().GetAudioCodec();
+    if (codec != nullptr) {
+        codec->EnableOutput(false);  // 先关输出，再开输入，避免把 AI 尾音录进新问题
+    }
+    playback_.Clear();
+    speaking_.store(false);
+}
+
+void HeadlessVoiceController::HandleTurnEnd(bool success) {
+    auto& led = HeadlessLedController::Instance();
+    auto& prompt = AudioPromptPlayer::Instance();
+    if (!success) {
+        if (current_turn_id_ != 0) {
+            DeviceVoiceClient::Instance().CancelTurn(current_turn_id_, "error");
+        }
+        CancelActiveTurn();
+        led.ShowError();
+        prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
+    }
+    conversation_active_.store(false);
+    current_turn_id_ = 0;
+    state_ = State::kReady;
+    led.ShowReady();
+}
+
+void HeadlessVoiceController::OnPcm(uint32_t /*turn_id*/, uint32_t /*sequence*/,
+                                    bool /*first*/, bool /*last*/,
+                                    const int16_t* pcm, size_t count) {
+    // turn_id 过滤已由 DeviceVoiceClient 依据 active_turn 完成；此处只入队
+    playback_.Push(pcm, count);  // 固定容量，满了丢弃（背压）
+    if (playback_task_ != nullptr) {
+        xTaskNotifyGive(playback_task_);
+    }
+}
+
+void HeadlessVoiceController::OnEvent(const voice::ServerMessage& msg) {
+    switch (msg.type) {
+        case voice::MessageType::kAsrPartial:
+            // 录音期间滚动预热文本：仅日志，不驱动任何播放
+            ESP_LOGI(TAG, "asr partial: %.*s", (int)std::min<size_t>(msg.text.size(), 200),
+                     msg.text.c_str());
+            break;
+        case voice::MessageType::kChatDelta: {
+            // 仅日志，后端才累积完整答案
+            if (!first_chat_delta_logged_) {
+                first_chat_delta_logged_ = true;
+                ESP_LOGI(TAG, "first chat delta");
+            }
+            ESP_LOGD(TAG, "chat delta: %.*s", (int)std::min<size_t>(msg.text.size(), 200),
+                     msg.text.c_str());
+            break;
+        }
+        case voice::MessageType::kTurnDone:
+            {
+                std::lock_guard<std::mutex> lk(conv_mutex_);
+                conversation_id_ = msg.conversation_id;  // 下一轮复用
+            }
+            playback_.MarkEndOfStream();  // 不再来新音频；播完排空即结束
+            if (event_queue_ != nullptr) {
+                Event e = Event::kTurnDone;
+                xQueueSend(event_queue_, &e, 0);
+            }
+            break;
+        case voice::MessageType::kTurnError:
+            if (event_queue_ != nullptr) {
+                Event e = Event::kTurnError;
+                xQueueSend(event_queue_, &e, 0);
+            }
+            break;
+        case voice::MessageType::kTurnCancelled:
+        case voice::MessageType::kTurnReady:
+        case voice::MessageType::kTtsSentence:
+        case voice::MessageType::kHello:
+        default:
+            break;
+    }
+}
+
+void HeadlessVoiceController::OnDisconnected(const char* reason) {
+    ESP_LOGW(TAG, "voice disconnected: %s", reason);
+    if (event_queue_ != nullptr) {
+        Event e = Event::kDisconnected;
+        xQueueSend(event_queue_, &e, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 播放线程（stream_v1 边收边播）
+// ---------------------------------------------------------------------------
+
+void HeadlessVoiceController::PlaybackTask(void* arg) {
+    static_cast<HeadlessVoiceController*>(arg)->PlaybackLoop();
+    vTaskDelete(nullptr);
+}
+
+void HeadlessVoiceController::PlaybackLoop() {
+    auto* codec = Board::GetInstance().GetAudioCodec();
+    std::vector<int16_t> chunk;
+    bool output_on = false;
+    bool end_posted = false;
+    for (;;) {
+        if (playback_task_ != xTaskGetCurrentTaskHandle()) {
+            // 占位校验（不可达）
+        }
+        xTaskNotifyWait(0, ULONG_MAX, nullptr, pdMS_TO_TICKS(40));  // 轮询兜底
+
+        size_t n = playback_.PopChunk(chunk, kPlaybackChunkSamples);
+        if (n > 0) {
+            if (!output_on && codec != nullptr) {
+                codec->EnableOutput(true);
+                output_on = true;
+                speaking_.store(true);
+            }
+            if (codec != nullptr) {
+                codec->OutputData(chunk);
+            }
+            end_posted = false;
+            vTaskDelay(pdMS_TO_TICKS(5));  // 轻微节流，防 DMA 写满
+        } else if (playback_.EndReached()) {
+            if (codec != nullptr && output_on) {
+                codec->EnableOutput(false);
+                output_on = false;
+                speaking_.store(false);
+            }
+            if (!end_posted) {
+                end_posted = true;
+                if (event_queue_ != nullptr) {
+                    Event e = Event::kPlaybackEnd;
+                    xQueueSend(event_queue_, &e, 0);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// legacy 路径（Task 9 回滚路径，保持不变）
+// ---------------------------------------------------------------------------
+
+void HeadlessVoiceController::HandlePressLegacy() {
     auto& led = HeadlessLedController::Instance();
     auto& prompt = AudioPromptPlayer::Instance();
     auto& net = HeadlessNetworkController::Instance();
 
-    // 一轮回答尚未结束：不并发录音/HTTP/打断播放
     if (state_ == State::kProcessing || state_ == State::kRecording) {
         prompt.Play(AudioPromptPlayer::Prompt::kWaitAnswer);
         led.ShowProcessing();
         return;
     }
-
-    // 前置条件：联网且不在配网；配置完整
     if (!net.IsConnected() || net.IsProvisioning()) {
         led.ShowError();
         prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
@@ -166,18 +588,16 @@ void HeadlessVoiceController::HandlePress() {
         return;
     }
 
-    // ---- 录音 ----
     state_ = State::kRecording;
     conversation_active_.store(true);
     led.ShowRecording();
 
-    // 诊断（Task 1）：本轮到当前 turnId，时间线从按下电源键开始
     current_turn_id_ = next_turn_id_++;
     timeline_.Reset(0);
     DiagMark(voice_diag::Stage::kRecording, "ptt_down");
 
     std::vector<int16_t> mic24k;
-    const size_t max_samples = kMaxRecordMs * (size_t)codec->input_sample_rate() / 1000;
+    const size_t max_samples = kLegacyMaxRecordMs * (size_t)codec->input_sample_rate() / 1000;
     codec->EnableInput(true);
     bool mic_error = false;
     while (ptt_held_.load() && mic24k.size() < max_samples) {
@@ -190,10 +610,9 @@ void HeadlessVoiceController::HandlePress() {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     codec->EnableInput(false);
-    ptt_held_ = false;  // 进入处理，忽略残留松开
+    ptt_held_ = false;
 
     if (mic_error || mic24k.empty()) {
-        // 输入设备异常/空数据：关闭输入、红灯提示、回待机（不播"网络"误导提示）
         ESP_LOGE(TAG, "mic error or no data");
         led.ShowError();
         conversation_active_.store(false);
@@ -201,7 +620,6 @@ void HeadlessVoiceController::HandlePress() {
         led.ShowReady();
         return;
     }
-
     size_t record_ms = mic24k.size() * 1000 / (size_t)codec->input_sample_rate();
     if (record_ms < kMinRecordMs) {
         ESP_LOGW(TAG, "recording too short: %u ms", (unsigned)record_ms);
@@ -216,14 +634,11 @@ void HeadlessVoiceController::HandlePress() {
              (unsigned)record_ms, (unsigned)mic24k.size());
     DiagMark(voice_diag::Stage::kRecording, "ptt_up");
 
-    // ---- 松开后链路：ASR → Chat → TTS → 播报 ----
     state_ = State::kProcessing;
     led.ShowProcessing();
     ProcessConversation(mic24k);
 
-    // 本轮流结束：打印整条时间线（含各子阶段耗时）
     timeline_.Log(TAG);
-
     conversation_active_.store(false);
     state_ = State::kReady;
     led.ShowReady();
@@ -233,7 +648,6 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
     auto& ai = AiClient::Instance();
     auto* codec = Board::GetInstance().GetAudioCodec();
 
-    // 重采样到网页配置的 ASR 采样率（8000/16000）并封装为 WAV
     int target = ConfigStore::Instance().GetInt("ai.sample_rate", 16000);
     std::vector<int16_t> pcm16k;
     Resample(mic24k, codec != nullptr ? codec->input_sample_rate() : 24000,
@@ -244,7 +658,6 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
         return;
     }
 
-    // ASR：语音 → 文本
     DiagMark(voice_diag::Stage::kAsr, "asr_request_start");
     std::string question;
     if (!ai.Transcribe(wav, question) || question.empty()) {
@@ -255,7 +668,6 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
     ESP_LOGI(TAG, "asr ok: %s", question.c_str());
     DiagMark(voice_diag::Stage::kAsr, "asr_final");
 
-    // Chat：SSE 流式文本（增量在此累加，供 TTS 使用）
     DiagMark(voice_diag::Stage::kChat, "chat_request_start");
     std::string reply;
     std::string conv_id;
@@ -275,7 +687,6 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
     ESP_LOGI(TAG, "chat ok, reply len=%u", (unsigned)reply.size());
     DiagMark(voice_diag::Stage::kChat, "chat_done");
 
-    // TTS：文本 → PCM，随后播报
     DiagMark(voice_diag::Stage::kTts, "tts_request_start");
     std::vector<int16_t> tts_pcm;
     bool first_tts_pcm_logged = false;
@@ -298,11 +709,8 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
 }
 
 void HeadlessVoiceController::HandleAiFailure() {
-    // 401 已由 AiClient 内部"清除 token → 重登 → 重试一次"消化；
-    // 仍失败时按 token 是否还在区分登录失败与网络异常。
     auto& prompt = AudioPromptPlayer::Instance();
     auto& led = HeadlessLedController::Instance();
-    // 诊断：本轮异常结束，标注 Cancel 阶段并打印时间线/资源
     DiagMark(voice_diag::Stage::kCancel, "turn_error");
     timeline_.Log(TAG);
     if (!AiClient::Instance().TokenAvailable()) {
@@ -368,9 +776,7 @@ void HeadlessVoiceController::SpeakPcm(const std::vector<int16_t>& pcm) {
     if (codec == nullptr || pcm.empty()) {
         return;
     }
-    // 播报标记先行置位：提示音播放器见"录音/播报中"会让路
     speaking_.store(true);
-    // 本地提示音若刚好在播（配网/错误音），等它结束再播，避免喇叭混音
     auto& prompt = AudioPromptPlayer::Instance();
     while (prompt.IsPlaying()) {
         vTaskDelay(pdMS_TO_TICKS(20));

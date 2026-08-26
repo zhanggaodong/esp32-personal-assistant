@@ -39,6 +39,12 @@ public:
     bool TokenAvailable() const { return !access_token_.empty(); }
     const std::string& AccessToken() const { return access_token_; }
 
+    // 使内存中的 JWT 立即失效（下次访问会重新登录）。
+    void InvalidateToken() { access_token_.clear(); }
+
+    // 语音 WebSocket 地址：把 backend_url 的 http(s) 换成 ws(s)，并拼 /api/voice/device。
+    std::string VoiceSocketUrl() const;
+
     // 语音识别：wav(16k/16bit/mono) -> out_text
     bool Transcribe(const std::vector<uint8_t>& wav, std::string& out_text);
 
@@ -53,7 +59,6 @@ private:
     AiClient() = default;
 
     bool DoLogin();
-    void InvalidateToken() { access_token_.clear(); }
 
     bool DoTranscribe(const std::vector<uint8_t>& wav, std::string& out_text);
     bool DoChat(const std::string& text, const OnDeltaFn& on_delta,

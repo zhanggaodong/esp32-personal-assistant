@@ -65,6 +65,8 @@ const ConfigItem kConfigSchema[] = {
     {"ai.voice", "朗读音色", ConfigType::kEnum, "mimo_default",
      "mimo_default|冰糖|茉莉|苏打|白桦|Mia|Chloe|Milo|Dean", "AI对话"},
     {"ai.sample_rate", "录音采样率", ConfigType::kEnum, "16000", "8000|16000", "AI对话"},
+    {"ai.max_record_seconds", "最长录音秒数", ConfigType::kEnum, "30", "15|30|60", "AI对话"},
+    {"ai.voice_protocol", "语音协议", ConfigType::kEnum, "legacy", "legacy|stream_v1", "AI对话"},
 };
 
 #endif  // CONFIG_APP_MODE_HEADLESS_VOICE

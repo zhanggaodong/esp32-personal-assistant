@@ -302,6 +302,21 @@ bool AiClient::Login() {
     return DoLogin();
 }
 
+std::string AiClient::VoiceSocketUrl() const {
+    std::string url = backend_url_;
+    // http -> ws，https -> wss
+    if (url.compare(0, 8, "https://") == 0) {
+        url.replace(0, 5, "wss://");
+    } else if (url.compare(0, 7, "http://") == 0) {
+        url.replace(0, 4, "ws://");
+    }
+    // 归一化尾随斜杠与路径前缀
+    while (!url.empty() && url.back() == '/') {
+        url.pop_back();
+    }
+    return url + "/api/voice/device";
+}
+
 bool AiClient::Transcribe(const std::vector<uint8_t>& wav, std::string& out_text) {
     // 401 语义：清除 token → 重登 → 仅重试一次；再失败由调用方提示账号密码
     for (int attempt = 0; attempt < 2; ++attempt) {
