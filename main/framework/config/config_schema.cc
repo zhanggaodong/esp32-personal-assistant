@@ -7,10 +7,14 @@
 // 无屏语音助手只保留 AI 服务配置：接口地址、账号、密码、朗读音色。
 // 录音采样率固定用 16000（ASR 标准采样率），不再开放配置以免误调；
 // ai.enabled 由"地址+账号+密码是否完整"隐式决定。
+// 默认值预置本人账号：整包烧录会清空 NVS 分区，靠默认值免重新输入；
+// 网页端修改后会覆盖默认值并保存到 NVS。注意固件二进制中包含该密码明文，
+// 本项目为个人私有仓库可接受，若转公开仓库需先改掉。
 const ConfigItem kConfigSchema[] = {
-    {"ai.backend_url", "接口地址", ConfigType::kString, "", nullptr, "AI服务"},
-    {"ai.account", "账号", ConfigType::kString, "", nullptr, "AI服务"},
-    {"ai.password", "密码", ConfigType::kPassword, "", nullptr, "AI服务"},
+    {"ai.backend_url", "接口地址", ConfigType::kString,
+     "https://ai.wuhewan.com", nullptr, "AI服务"},
+    {"ai.account", "账号", ConfigType::kString, "18238728844", nullptr, "AI服务"},
+    {"ai.password", "密码", ConfigType::kPassword, "zxc123", nullptr, "AI服务"},
     {"ai.voice", "朗读音色", ConfigType::kEnum, "mimo_default",
      "mimo_default|冰糖|茉莉|苏打|白桦|Mia|Chloe|Milo|Dean", "AI服务"},
 };

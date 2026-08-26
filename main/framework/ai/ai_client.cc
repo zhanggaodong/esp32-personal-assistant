@@ -8,6 +8,9 @@
 #include <initializer_list>
 #include <utility>
 
+// TTS 低带宽模式解码（78/esp-opus-encoder 组件，60ms 帧单声道）
+#include <opus_decoder.h>
+
 #include "../config/config_store.h"
 #include "../web/json_util.h"
 #include "../device_log.h"
@@ -217,6 +220,92 @@ private:
     std::string event_;
     std::string data_;
 };
+
+// ---- TTS 低带宽(opus)二进制流 ----
+// 线契约（与后端 tts-opus.transform.ts 一致）：
+//   头 6B: 'V''O' | ver u8 | channels u8 | sampleRate u16LE
+//   帧循环: type u8 (1=opus 2=done 3=error) | len u16LE | payload
+
+// 带缓冲的字节读取器：对 esp_http_client_read 封装"精确读 n 字节"
+class HttpByteReader {
+public:
+    explicit HttpByteReader(esp_http_client_handle_t client)
+        : client_(client) {}
+    void Seed(const char* data, size_t len) { buf_.append(data, len); }
+    bool ReadExactly(size_t n, std::string& out) {
+        while (buf_.size() < n) {
+            char tmp[1024];
+            int r = esp_http_client_read(client_, tmp, sizeof(tmp));
+            if (r <= 0) {
+                return false;  // 连接关闭/超时
+            }
+            buf_.append(tmp, (size_t)r);
+        }
+        out.assign(buf_, 0, n);
+        buf_.erase(0, n);
+        return true;
+    }
+
+private:
+    esp_http_client_handle_t client_;
+    std::string buf_;
+};
+
+// 解析 opus 流（嗅探已确认 "VO" 头并消费前 2 字节）。EOF 视为正常结束。
+bool DecodeOpusStream(esp_http_client_handle_t client,
+                      const AiClient::OnAudioPcmFn& on_pcm) {
+    HttpByteReader reader(client);
+    std::string hdr;
+    if (!reader.ReadExactly(4, hdr)) {
+        ESP_LOGE(TAG, "Opus stream header truncated");
+        return false;
+    }
+    const uint8_t channels = (uint8_t)hdr[1];
+    int rate = (int)((uint8_t)hdr[2] | ((uint8_t)hdr[3] << 8));
+    if (channels != 1 || rate < 8000 || rate > 48000) {
+        ESP_LOGE(TAG, "Opus stream unsupported: ch=%u rate=%d", channels, rate);
+        return false;
+    }
+    OpusDecoderWrapper decoder(rate, 1, 60);
+
+    for (;;) {
+        std::string fh;
+        if (!reader.ReadExactly(3, fh)) {
+            break;  // EOF：服务器结束响应
+        }
+        const uint8_t type = (uint8_t)fh[0];
+        uint16_t len = (uint16_t)((uint8_t)fh[1] | ((uint8_t)fh[2] << 8));
+        if (len > 4096) {
+            ESP_LOGE(TAG, "Opus frame too large: %u", len);
+            return false;
+        }
+        std::string payload;
+        if (len > 0 && !reader.ReadExactly(len, payload)) {
+            break;
+        }
+        if (type == 2) {  // done
+            DeviceLog::Log('I', "AiClient", "TTS 合成完成");
+            break;
+        }
+        if (type == 3) {  // error
+            ESP_LOGE(TAG, "tts server error: %s", payload.c_str());
+            DeviceLog::Log('E', "AiClient", "TTS 服务端报错");
+            return false;
+        }
+        if (type != 1 || len == 0) {
+            continue;
+        }
+        std::vector<uint8_t> opus(payload.begin(), payload.end());
+        std::vector<int16_t> pcm;
+        if (!decoder.Decode(std::move(opus), pcm)) {
+            continue;  // 单帧损坏容忍，继续下一帧
+        }
+        if (!pcm.empty() && on_pcm) {
+            on_pcm(pcm.data(), pcm.size());
+        }
+    }
+    return true;
+}
 
 }  // namespace
 
@@ -550,7 +639,8 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
         "Authorization: Bearer " + access_token_,
     };
 
-    std::string url = JoinUrl(backend_url_, "/api/tts/synthesize/stream");
+    std::string url = JoinUrl(backend_url_, "/api/tts/synthesize/stream") +
+                      "?audio=opus";
     esp_http_client_config_t cfg = {};
     cfg.url = url.c_str();
     cfg.method = HTTP_METHOD_POST;
@@ -600,6 +690,29 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
         return false;
     }
 
+    // 嗅探前两字节：新后端返回 "VO"（opus 二进制流，约 1/11 带宽），
+    // 旧后端/APP 兼容格式为 SSE 文本（"data:..."）。自动适配无需配置。
+    std::string sse_seed;
+    {
+        char head[2] = {0, 0};
+        size_t got = 0;
+        while (got < sizeof(head)) {
+            int r = esp_http_client_read(client, head + got,
+                                         sizeof(head) - got);
+            if (r <= 0) {
+                break;
+            }
+            got += (size_t)r;
+        }
+        if (got >= 2 && head[0] == 'V' && head[1] == 'O') {
+            bool ok = DecodeOpusStream(client, on_pcm);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return ok;
+        }
+        sse_seed.assign(head, got);
+    }
+
     SseParser parser([&](const std::string& event, const std::string& data) {
         if (event != "") {
             return;  // 关注默认 data 事件
@@ -626,6 +739,8 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
         // metadata 忽略
     });
 
+    // 先把嗅探阶段已读入的字节交给 SSE 解析器，再继续常规读取
+    parser.Feed(sse_seed.data(), sse_seed.size());
     // 仅 headless 工作线程串行调用，用静态缓冲省任务栈（同 DoChat）
     static char buf[2048];
     int n;
