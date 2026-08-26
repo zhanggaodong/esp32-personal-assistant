@@ -8,6 +8,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch: # 允许在 Actions 页面手动点击 Run workflow 触发
 
 permissions:
   contents: read
