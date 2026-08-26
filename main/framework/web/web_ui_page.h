@@ -43,7 +43,7 @@ static const char INDEX_HTML[] = R"HTML(<!DOCTYPE html>
   <div class="group">
     <h2>设备日志（登录 / 请求 / 对话）</h2>
     <div class="logbar">
-      <span style="font-size:12px;color:#666">自动刷新，最新在底部</span>
+      <span style="font-size:12px;color:#666">自动刷新，最新在底部；带 * 为设备未校时（显示开机后时长）</span>
       <button class="danger" onclick="clearLogs()" style="padding:4px 10px;font-size:12px">清空</button>
     </div>
     <div class="logbox" id="logbox"></div>
@@ -134,11 +134,17 @@ function toast(msg){
 
 let lastLogCount=0;
 function fmtTime(ms){
+  // 设备端 NTP 校时后 /api/logs 下发绝对时间戳(epoch 毫秒)；未校时时
+  // 回退为开机毫秒。1e12 ≈ 2001-09，开机时长不可能达到，以此区分两种情况。
+  if(ms>1e12){
+    const d=new Date(ms);
+    return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0');
+  }
   const s=Math.floor(ms/1000);
   const h=String(Math.floor(s/3600)).padStart(2,'0');
   const m=String(Math.floor((s%3600)/60)).padStart(2,'0');
   const sec=String(s%60).padStart(2,'0');
-  return h+':'+m+':'+sec;
+  return h+':'+m+':'+sec+'*';
 }
 async function refreshLogs(){
   try{

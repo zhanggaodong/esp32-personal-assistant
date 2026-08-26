@@ -84,7 +84,6 @@ private:
     void ProcessConversation(const std::vector<int16_t>& mic24k);
     void HandleAiFailure();
     bool BuildWav(const std::vector<int16_t>& pcm, int rate, std::vector<uint8_t>& wav);
-    void SpeakPcm(const std::vector<int16_t>& pcm);
 
     // —— 播放线程（stream_v1 边收边播）——
     static void PlaybackTask(void* arg);

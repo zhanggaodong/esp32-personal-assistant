@@ -59,6 +59,12 @@ const char* ResetReasonChinese(esp_reset_reason_t reason) {
             return "掉电/欠压(BROWNOUT)";
         case ESP_RST_SDIO:
             return "SDIO 复位";
+        case ESP_RST_USB_UART:
+            return "USB/UART 手动复位(烧录/按复位键)";
+        case ESP_RST_JTAG:
+            return "JTAG 复位";
+        case ESP_RST_EFUSE_RCC:
+            return "eFuse 重烧复位";
         default:
             return "<未知枚举>";
     }

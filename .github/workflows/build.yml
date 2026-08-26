@@ -35,6 +35,15 @@ jobs:
           path: build/merged-binary.bin
           if-no-files-found: error
 
+      - name: Upload debug symbols (elf/map, 用于 panic backtrace 符号化)
+        uses: actions/upload-artifact@v4
+        with:
+          name: personal_assistant_jiuchuan-s3_${{ github.sha }}_symbols
+          path: |
+            build/xiaozhi.elf
+            build/xiaozhi.map
+          if-no-files-found: error
+
   build-headless:
     name: Build jiuchuan-s3-headless (无屏语音助手)
     runs-on: ubuntu-latest
@@ -55,4 +64,13 @@ jobs:
         with:
           name: personal_assistant_jiuchuan-s3-headless_${{ github.sha }}.bin
           path: build/merged-binary.bin
+          if-no-files-found: error
+
+      - name: Upload debug symbols (elf/map, 用于 panic backtrace 符号化)
+        uses: actions/upload-artifact@v4
+        with:
+          name: personal_assistant_jiuchuan-s3-headless_${{ github.sha }}_symbols
+          path: |
+            build/xiaozhi.elf
+            build/xiaozhi.map
           if-no-files-found: error

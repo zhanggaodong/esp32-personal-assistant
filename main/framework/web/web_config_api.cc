@@ -1,9 +1,11 @@
 #include "web_config_api.h"
 
 #include <string.h>
+#include <sys/time.h>
 #include <vector>
 
 #include <esp_log.h>
+#include <esp_timer.h>
 
 #include "board.h"
 #include "config/config_store.h"
@@ -167,15 +169,32 @@ esp_err_t HandleGetStatus(httpd_req_t* req) {
 }
 
 // GET /api/logs —— 返回设备日志环（登录/请求/对话关键日志），供排查。
+// 日志环内保存的是开机毫秒；这里换算成真实墙钟时间再下发：
+//   开机时刻(epoch) = 当前系统时间 - 当前开机时长
+// 逐条加上各自的开机毫秒即得绝对时间。好处：NTP 校时之前写入的日志，
+// 校时后也能显示正确的当前时间。系统时间尚未校时（仍为 1970）时退回
+// 原始开机毫秒，前端据此显示"开机后时长"。
 esp_err_t HandleGetLogs(httpd_req_t* req) {
     auto logs = DeviceLog::Snapshot();
+
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    const int64_t now_epoch_ms =
+        (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    const int64_t now_uptime_ms = esp_timer_get_time() / 1000;
+    // 1600000000 ≈ 2020-09：低于该值说明 NTP 尚未校时
+    const bool time_valid = now_epoch_ms > (int64_t)1600000000 * 1000;
+    const int64_t boot_epoch_ms = now_epoch_ms - now_uptime_ms;
+
     std::string out = "{\"logs\":[";
     for (size_t i = 0; i < logs.size(); ++i) {
         if (i > 0) {
             out += ",";
         }
         const auto& e = logs[i];
-        out += "{\"t\":" + std::to_string(e.ts_ms) +
+        const int64_t t_ms = time_valid ? boot_epoch_ms + (int64_t)e.ts_ms
+                                        : (int64_t)e.ts_ms;
+        out += "{\"t\":" + std::to_string(t_ms) +
                ",\"l\":\"" + std::string(1, e.level) +
                "\",\"tag\":\"" + json_util::Escape(e.tag) +
                "\",\"m\":\"" + json_util::Escape(e.msg) + "\"}";

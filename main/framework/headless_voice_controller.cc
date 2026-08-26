@@ -340,6 +340,9 @@ void HeadlessVoiceController::BeginRecording() {
     frame_buf_.clear();
     resample_buf_.clear();
     turn_seq_ = 0;
+    // 复位下行队列：清掉上一轮残留的 end_of_stream 标记。否则新一轮首帧
+    // 到达前的瞬时空队列会被误判为"上一轮已播完"，提前发出 kPlaybackEnd。
+    playback_.Clear();
     rec_start_ms_ = (uint64_t)NowMs();
     const size_t mic_rate = (size_t)codec->input_sample_rate();
     const size_t chunk_samples = mic_rate / 50;  // 20ms
@@ -519,11 +522,11 @@ void HeadlessVoiceController::PlaybackLoop() {
     bool output_on = false;
     bool end_posted = false;
     for (;;) {
-        if (playback_task_ != xTaskGetCurrentTaskHandle()) {
-            // 占位校验（不可达）
-        }
         xTaskNotifyWait(0, 0xFFFFFFFFUL, nullptr, pdMS_TO_TICKS(40));  // 轮询兜底
 
+        // PopChunk 是追加语义（头文件约定 out 调用前 clear）：
+        // 不清空会导致 chunk 无限增长、OutputData 反复重播旧数据并耗尽内存。
+        chunk.clear();
         size_t n = playback_.PopChunk(chunk, kPlaybackChunkSamples);
         if (n > 0) {
             if (!output_on && codec != nullptr) {
@@ -688,23 +691,65 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
     DiagMark(voice_diag::Stage::kChat, "chat_done");
 
     DiagMark(voice_diag::Stage::kTts, "tts_request_start");
-    std::vector<int16_t> tts_pcm;
-    bool first_tts_pcm_logged = false;
+    // 边收边播：TTS PCM 分片到达即写扬声器，不再累积完整音频。
+    // 首次攒够 kTtsPrebufferSamples 再开输出，抵抗网络抖动；此后逐块直写，
+    // 由 OutputData 的阻塞写做节奏控制。若链路慢于实时，会出现欠跑（断续），
+    // 但首声时间从"整段合成完"提前到"首个分片到达"。
+    constexpr size_t kTtsPrebufferSamples = 24000 * 250 / 1000;  // 250ms @24kHz
+    auto* prompt = &AudioPromptPlayer::Instance();
+    bool first_tts_pcm = false;
+    bool output_open = false;
+    bool played_any = false;
+    std::vector<int16_t> prebuffer;
+    auto open_output = [&]() {
+        while (prompt->IsPlaying()) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        codec->EnableOutput(true);
+        speaking_.store(true);
+        output_open = true;
+        played_any = true;
+        DiagMark(voice_diag::Stage::kPlayback, "speaker_first_pcm");
+    };
+    auto write_pcm = [&](const int16_t* data, size_t count) {
+        std::vector<int16_t> chunk(data, data + count);
+        codec->OutputData(chunk);
+    };
     bool tts_ok = ai.Synthesize(reply, [&](const int16_t* pcm, size_t n) {
-        if (!first_tts_pcm_logged) {
-            first_tts_pcm_logged = true;
+        if (!first_tts_pcm) {
+            first_tts_pcm = true;
             DiagMark(voice_diag::Stage::kTts, "tts_first_pcm");
         }
-        tts_pcm.insert(tts_pcm.end(), pcm, pcm + n);
+        if (!output_open) {
+            prebuffer.insert(prebuffer.end(), pcm, pcm + n);
+            if (prebuffer.size() < kTtsPrebufferSamples) {
+                return;  // 未达预缓冲线，继续攒
+            }
+            open_output();
+            write_pcm(prebuffer.data(), prebuffer.size());
+            prebuffer.clear();
+            return;
+        }
+        write_pcm(pcm, n);
     });
-    if (!tts_ok || tts_pcm.empty()) {
+    // 收尾：短音频可能始终没达到预缓冲线，此时也要播出并关输出
+    if (!prebuffer.empty() && tts_ok && first_tts_pcm) {
+        if (!output_open) {
+            open_output();
+        }
+        write_pcm(prebuffer.data(), prebuffer.size());
+        prebuffer.clear();
+    }
+    if (output_open) {
+        codec->EnableOutput(false);
+        speaking_.store(false);
+    }
+    if (!tts_ok || !played_any) {
         ESP_LOGE(TAG, "tts failed or empty pcm");
         HandleAiFailure();
         return;
     }
-    ESP_LOGI(TAG, "tts ok, pcm=%u samples", (unsigned)tts_pcm.size());
     DiagMark(voice_diag::Stage::kTts, "tts_done");
-    SpeakPcm(tts_pcm);
     DiagMark(voice_diag::Stage::kPlayback, "speaker_done");
 }
 
@@ -769,28 +814,4 @@ bool HeadlessVoiceController::BuildWav(const std::vector<int16_t>& pcm, int rate
         wav.push_back((uint8_t)((uint16_t)s >> 8));
     }
     return true;
-}
-
-void HeadlessVoiceController::SpeakPcm(const std::vector<int16_t>& pcm) {
-    auto* codec = Board::GetInstance().GetAudioCodec();
-    if (codec == nullptr || pcm.empty()) {
-        return;
-    }
-    speaking_.store(true);
-    auto& prompt = AudioPromptPlayer::Instance();
-    while (prompt.IsPlaying()) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-
-    codec->EnableOutput(true);
-    DiagMark(voice_diag::Stage::kPlayback, "speaker_first_pcm");
-    const size_t chunk_samples = 1920;  // 80ms @24kHz
-    for (size_t off = 0; off < pcm.size() && codec->output_enabled(); off += chunk_samples) {
-        size_t n = std::min(chunk_samples, pcm.size() - off);
-        std::vector<int16_t> chunk(pcm.begin() + off, pcm.begin() + off + n);
-        codec->OutputData(chunk);
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    codec->EnableOutput(false);
-    speaking_.store(false);
 }

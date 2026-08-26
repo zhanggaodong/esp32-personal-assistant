@@ -12,9 +12,11 @@
 // 规则：
 //   - 固定容量：最大缓存 2 秒（24kHz/16bit/单声道 = 48000 采样）；
 //     达到上限时 Push 返回 kFull，网络读取侧施加背压，不扩容。
-//   - 预缓冲：累积到 kPrebufferSamples 前 PopChunk 返回空（不启动播放）；
-//     达到后按需出队，抵抗网络抖动。
-//   - 插话打断：Clear() 立即清空并递增 generation，旧轮残留音频无效。
+//   - 预缓冲只在开播前生效：未开播时攒满 kPrebufferSamples 才允许第一次
+//     出队；开播后按需出队、有多少播多少，EOS 后排空到空（否则尾音
+//     永远出不来，EndReached 永不成立）。
+//   - 插话打断：Clear() 立即清空并递增 generation，旧轮残留音频无效，
+//     同时复位"已开播"状态，新一轮重新预缓冲。
 //   - 结束语义：MarkEndOfStream() 后，PlaybackTask 播到队列空即视为结束
 //     （EndReached()），控制器再回 Ready。
 namespace voice {
@@ -32,7 +34,7 @@ public:
     // 入队 PCM（16bit 单声道采样）。
     PushResult Push(const int16_t* pcm, size_t count);
 
-    // 出队最多 max_samples 个采样；预缓冲未达标或队列空返回 0。
+    // 出队最多 max_samples 个采样；开播前未达预缓冲线且无 EOS 时返回 0。
     // out 需要在调用前 clear。
     size_t PopChunk(std::vector<int16_t>& out, size_t max_samples);
 
@@ -57,6 +59,7 @@ private:
     mutable std::mutex mutex_;
     std::deque<int16_t> samples_;
     bool end_of_stream_ = false;
+    bool playing_ = false;  // 是否已经开播过（预缓冲门只拦第一次）
     size_t generation_ = 0;
 };
 
