@@ -522,7 +522,7 @@ void HeadlessVoiceController::PlaybackLoop() {
         if (playback_task_ != xTaskGetCurrentTaskHandle()) {
             // 占位校验（不可达）
         }
-        xTaskNotifyWait(0, ULONG_MAX, nullptr, pdMS_TO_TICKS(40));  // 轮询兜底
+        xTaskNotifyWait(0, 0xFFFFFFFFUL, nullptr, pdMS_TO_TICKS(40));  // 轮询兜底
 
         size_t n = playback_.PopChunk(chunk, kPlaybackChunkSamples);
         if (n > 0) {

@@ -304,11 +304,11 @@ bool AiClient::Login() {
 
 std::string AiClient::VoiceSocketUrl() const {
     std::string url = backend_url_;
-    // http -> ws，https -> wss
+    // http -> ws，https -> wss（按完整 scheme 长度替换，避免残留 "://"）
     if (url.compare(0, 8, "https://") == 0) {
-        url.replace(0, 5, "wss://");
+        url.replace(0, 8, "wss://");
     } else if (url.compare(0, 7, "http://") == 0) {
-        url.replace(0, 4, "ws://");
+        url.replace(0, 7, "ws://");
     }
     // 归一化尾随斜杠与路径前缀
     while (!url.empty() && url.back() == '/') {

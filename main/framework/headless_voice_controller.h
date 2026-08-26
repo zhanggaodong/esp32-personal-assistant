@@ -74,10 +74,10 @@ private:
     void OnDisconnected(const char* reason);
 
     void HandlePressStream();  // kReady/(播报中)按下：开新一轮或插话
-    void BeginRecording();     // 开麦 + 建立连接 + turn.start
-    void FinishRecording();    // 关麦 + 发送 turn.stop（过短则 cancel）
+    void BeginRecording();     // 开麦 + 建立连接 + turn.start + 流式上行 + 收尾
     void CancelActiveTurn();   // 插话/断线：cancel + 清队列 + 关输出
     void HandleEvent(Event e); // 集中处理状态迁移
+    void HandleTurnEnd(bool success);  // 一轮结束：成功(播完排空)或失败(报错)统一收尾
 
     // —— legacy 路径（保留）——
     void HandlePressLegacy();

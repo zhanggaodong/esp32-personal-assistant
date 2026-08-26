@@ -29,6 +29,8 @@ DeviceVoiceClient& DeviceVoiceClient::Instance() {
     return instance;
 }
 
+DeviceVoiceClient::~DeviceVoiceClient() = default;
+
 int64_t DeviceVoiceClient::NowMs() {
     return esp_timer_get_time() / 1000;
 }

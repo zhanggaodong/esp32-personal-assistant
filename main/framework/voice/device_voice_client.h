@@ -74,6 +74,9 @@ public:
 
 private:
     DeviceVoiceClient() = default;
+    // 必须在 .cc 中实现（彼处 WebSocket 完整），否则隐式析构在 .h 触发
+    // 对不完整类型 unique_ptr<WebSocket> 求 sizeof 导致编译错误。
+    ~DeviceVoiceClient();
 
     bool DoConnect();  // 建连 + 等 hello（不含重登重试）
     void HandleText(const char* data, size_t len);
