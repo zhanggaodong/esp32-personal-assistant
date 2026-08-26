@@ -123,11 +123,14 @@ void HeadlessVoiceController::Start() {
             ESP_LOGE(TAG, "failed to create event queue");
             return;
         }
-        if (xTaskCreate(PlaybackTask, "headless_playback", 4096, this, 4,
-                        &playback_task_) != pdPASS) {
-            ESP_LOGE(TAG, "failed to create playback task");
-            playback_task_ = nullptr;
-        }
+    }
+
+    // 播放线程两种模式共用：stream_v1 下行走 playback_ 队列，legacy TTS
+    // 边收边播也走同一队列（参考 xiaozhi 的"深缓冲+阻塞写扬声器"结构）。
+    if (xTaskCreate(PlaybackTask, "headless_playback", 4096, this, 4,
+                    &playback_task_) != pdPASS) {
+        ESP_LOGE(TAG, "failed to create playback task");
+        playback_task_ = nullptr;
     }
 
     state_ = State::kWaitWifi;
@@ -343,6 +346,7 @@ void HeadlessVoiceController::BeginRecording() {
     // 复位下行队列：清掉上一轮残留的 end_of_stream 标记。否则新一轮首帧
     // 到达前的瞬时空队列会被误判为"上一轮已播完"，提前发出 kPlaybackEnd。
     playback_.Clear();
+    playback_.set_prebuffer_samples(voice::PcmPlaybackQueue::kPrebufferSamples);
     rec_start_ms_ = (uint64_t)NowMs();
     const size_t mic_rate = (size_t)codec->input_sample_rate();
     const size_t chunk_samples = mic_rate / 50;  // 20ms
@@ -691,64 +695,53 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
     DiagMark(voice_diag::Stage::kChat, "chat_done");
 
     DiagMark(voice_diag::Stage::kTts, "tts_request_start");
-    // 边收边播：TTS PCM 分片到达即写扬声器，不再累积完整音频。
-    // 首次攒够 kTtsPrebufferSamples 再开输出，抵抗网络抖动；此后逐块直写，
-    // 由 OutputData 的阻塞写做节奏控制。若链路慢于实时，会出现欠跑（断续），
-    // 但首声时间从"整段合成完"提前到"首个分片到达"。
-    constexpr size_t kTtsPrebufferSamples = 24000 * 250 / 1000;  // 250ms @24kHz
-    auto* prompt = &AudioPromptPlayer::Instance();
+    // 边收边播（参考 xiaozhi 的"深缓冲 + 阻塞写扬声器"结构）：与 stream_v1
+    // 共用固定容量播放队列与播放线程。预缓冲 400ms 吸收网络抖动；队列满时
+    // 生产者等待（背压），不丢块；EOS 后播放线程排空到空。喂入速率低于实时
+    // 时表现为首声稍晚，而不是直写模式那种饥饿断流/缺词。
+    playback_.Clear();
+    playback_.set_prebuffer_samples(24000 * 400 / 1000);  // 400ms @24kHz
     bool first_tts_pcm = false;
-    bool output_open = false;
-    bool played_any = false;
-    std::vector<int16_t> prebuffer;
-    auto open_output = [&]() {
-        while (prompt->IsPlaying()) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-        codec->EnableOutput(true);
-        speaking_.store(true);
-        output_open = true;
-        played_any = true;
-        DiagMark(voice_diag::Stage::kPlayback, "speaker_first_pcm");
-    };
-    auto write_pcm = [&](const int16_t* data, size_t count) {
-        std::vector<int16_t> chunk(data, data + count);
-        codec->OutputData(chunk);
-    };
     bool tts_ok = ai.Synthesize(reply, [&](const int16_t* pcm, size_t n) {
         if (!first_tts_pcm) {
             first_tts_pcm = true;
             DiagMark(voice_diag::Stage::kTts, "tts_first_pcm");
         }
-        if (!output_open) {
-            prebuffer.insert(prebuffer.end(), pcm, pcm + n);
-            if (prebuffer.size() < kTtsPrebufferSamples) {
-                return;  // 未达预缓冲线，继续攒
-            }
-            open_output();
-            write_pcm(prebuffer.data(), prebuffer.size());
-            prebuffer.clear();
-            return;
+        while (playback_.Push(pcm, n) ==
+               voice::PcmPlaybackQueue::PushResult::kFull) {
+            // 队列满：等播放线程消化（背压），绝不丢音频块
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
-        write_pcm(pcm, n);
     });
-    // 收尾：短音频可能始终没达到预缓冲线，此时也要播出并关输出
-    if (!prebuffer.empty() && tts_ok && first_tts_pcm) {
-        if (!output_open) {
-            open_output();
+    if (!tts_ok || !first_tts_pcm) {
+        // 中途失败：用 EOS 让播放线程排空残留并自行关输出/清 speaking_
+        // （直接 Clear 会留下"输出已开但永远等不到数据"的悬挂状态），
+        // 排空后再播错误提示，避免提示音被 speaking_ 门挡掉。
+        playback_.MarkEndOfStream();
+        const int64_t fail_deadline = NowMs() + 10000;
+        while (!playback_.EndReached() && NowMs() < fail_deadline) {
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
-        write_pcm(prebuffer.data(), prebuffer.size());
-        prebuffer.clear();
-    }
-    if (output_open) {
-        codec->EnableOutput(false);
-        speaking_.store(false);
-    }
-    if (!tts_ok || !played_any) {
+        playback_.Clear();
         ESP_LOGE(TAG, "tts failed or empty pcm");
         HandleAiFailure();
         return;
     }
+    playback_.MarkEndOfStream();
+    // 等播放线程把缓冲排空（含预缓冲与尾音），超时兜底防卡死
+    const int64_t drain_deadline = NowMs() + 90000;
+    while (!playback_.EndReached() && NowMs() < drain_deadline) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (!playback_.EndReached()) {
+        ESP_LOGW(TAG, "playback drain timeout, force stop");
+        auto* c = Board::GetInstance().GetAudioCodec();
+        if (c != nullptr) {
+            c->EnableOutput(false);
+        }
+        speaking_.store(false);
+    }
+    playback_.Clear();
     DiagMark(voice_diag::Stage::kTts, "tts_done");
     DiagMark(voice_diag::Stage::kPlayback, "speaker_done");
 }

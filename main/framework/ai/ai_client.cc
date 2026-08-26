@@ -445,7 +445,7 @@ bool AiClient::DoChat(const std::string& text, const OnDeltaFn& on_delta,
     cfg.url = url.c_str();
     cfg.method = HTTP_METHOD_POST;
     cfg.timeout_ms = 60000;  // 长流，首包等待放宽
-    cfg.buffer_size = 2048;
+    cfg.buffer_size = 8192;  // SSE 大块吞吐：减少 TLS 解密与拷贝次数
     cfg.crt_bundle_attach = esp_crt_bundle_attach;  // https 证书校验
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -518,7 +518,9 @@ bool AiClient::DoChat(const std::string& text, const OnDeltaFn& on_delta,
         }
     });
 
-    char buf[1024];
+    // 仅 headless 工作线程串行调用，用静态缓冲省任务栈；2048 配合客户端
+    // 8KB 内部缓冲减少每字节摊销的 TLS 解密调用次数。
+    static char buf[2048];
     int n;
     int total = 0;
     while ((n = esp_http_client_read(client, buf, sizeof(buf))) > 0) {
@@ -553,7 +555,7 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
     cfg.url = url.c_str();
     cfg.method = HTTP_METHOD_POST;
     cfg.timeout_ms = 60000;
-    cfg.buffer_size = 2048;
+    cfg.buffer_size = 8192;  // 音频大块吞吐：减少 TLS 解密与拷贝次数
     cfg.crt_bundle_attach = esp_crt_bundle_attach;  // https 证书校验
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -624,7 +626,8 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
         // metadata 忽略
     });
 
-    char buf[1024];
+    // 仅 headless 工作线程串行调用，用静态缓冲省任务栈（同 DoChat）
+    static char buf[2048];
     int n;
     while ((n = esp_http_client_read(client, buf, sizeof(buf))) > 0) {
         parser.Feed(buf, (size_t)n);

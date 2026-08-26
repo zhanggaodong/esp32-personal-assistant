@@ -23,12 +23,12 @@ size_t PcmPlaybackQueue::PopChunk(std::vector<int16_t>& out,
     if (samples_.empty() || max_samples == 0) {
         return 0;
     }
-    // 预缓冲只在"开播前"生效：攒够 120ms 才允许第一次出队，抵抗网络抖动。
-    // 一旦开播就不再回退到预缓冲线——否则句间网络抖动会让播放反复停等
-    // 重新攒缓冲（插入长静音），且 turn.done 后剩余不足预缓冲线的尾音
-    // 永远无法出队，EndReached 永不成立（收尾死锁）。
+    // 预缓冲只在"开播前"生效：攒够 prebuffer_samples_ 才允许第一次出队，
+    // 抵抗网络抖动。一旦开播就不再回退到预缓冲线——否则句间网络抖动会让
+    // 播放反复停等重新攒缓冲（插入长静音），且 turn.done 后剩余不足
+    // 预缓冲线的尾音永远无法出队，EndReached 永不成立（收尾死锁）。
     if (!playing_) {
-        const bool enough = samples_.size() >= kPrebufferSamples;
+        const bool enough = samples_.size() >= prebuffer_samples_;
         if (!enough && !end_of_stream_) {
             return 0;
         }
@@ -50,7 +50,7 @@ size_t PcmPlaybackQueue::BufferedSamples() const {
 
 bool PcmPlaybackQueue::Ready() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return samples_.size() >= kPrebufferSamples;
+    return samples_.size() >= prebuffer_samples_;
 }
 
 void PcmPlaybackQueue::Clear() {

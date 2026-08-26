@@ -38,6 +38,13 @@ public:
     // out 需要在调用前 clear。
     size_t PopChunk(std::vector<int16_t>& out, size_t max_samples);
 
+    // 调整预缓冲线（采样数）。默认 kPrebufferSamples（120ms）；
+    // 不同链路可设不同值（如 legacy TTS 设 400ms 抗抖动）。会立即生效。
+    void set_prebuffer_samples(size_t samples) {
+        prebuffer_samples_ = samples;
+    }
+    size_t prebuffer_samples() const { return prebuffer_samples_; }
+
     // 当前缓冲的采样数（秒 = samples / kSampleRate）。
     size_t BufferedSamples() const;
 
@@ -58,6 +65,7 @@ public:
 private:
     mutable std::mutex mutex_;
     std::deque<int16_t> samples_;
+    size_t prebuffer_samples_ = kPrebufferSamples;
     bool end_of_stream_ = false;
     bool playing_ = false;  // 是否已经开播过（预缓冲门只拦第一次）
     size_t generation_ = 0;
