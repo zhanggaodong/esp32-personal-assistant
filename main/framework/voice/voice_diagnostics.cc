@@ -59,11 +59,18 @@ const char* ResetReasonChinese(esp_reset_reason_t reason) {
             return "掉电/欠压(BROWNOUT)";
         case ESP_RST_SDIO:
             return "SDIO 复位";
-        case ESP_RST_USB_UART:
+        default:
+            break;
+    }
+    // IDF 各版本对部分复位原因的枚举命名不一致（如 USB/UART 手动复位在
+    // 新旧版本分别叫 ESP_RST_USB / ESP_RST_USB_UART），但数值位置稳定：
+    // 11=USB/UART 手动、12=JTAG、13=eFuse 重烧。按数值映射保证可移植。
+    switch (static_cast<int>(reason)) {
+        case 11:
             return "USB/UART 手动复位(烧录/按复位键)";
-        case ESP_RST_JTAG:
+        case 12:
             return "JTAG 复位";
-        case ESP_RST_EFUSE_RCC:
+        case 13:
             return "eFuse 重烧复位";
         default:
             return "<未知枚举>";

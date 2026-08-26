@@ -258,7 +258,6 @@ bool ParseServerMessage(const char* json, size_t len, ServerMessage& out) {
         out.turn_id = turn_id;
         out.has_turn_id = true;
     }
-    int version = 0;
     const cJSON* v = cJSON_GetObjectItemCaseSensitive(root, "version");
     if (cJSON_IsNumber(v)) {
         out.version = static_cast<int>(v->valuedouble);
