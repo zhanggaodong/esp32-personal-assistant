@@ -733,6 +733,9 @@ if(CONFIG_APP_MODE_HEADLESS_VOICE)
         "framework/headless_network_controller.cc"
         "framework/audio_prompt_player.cc"
         "framework/voice/voice_diagnostics.cc"
+        "framework/voice/streaming_resampler.cc"
+        "framework/voice/audio_uplink_queue.cc"
+        "framework/voice/pcm_playback_queue.cc"
     )
 endif()
 
