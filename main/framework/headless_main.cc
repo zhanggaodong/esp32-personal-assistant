@@ -11,6 +11,7 @@
 #include "headless_led_controller.h"
 #include "headless_network_controller.h"
 #include "headless_voice_controller.h"
+#include "voice/voice_diagnostics.h"
 
 #define TAG "Headless"
 
@@ -19,6 +20,10 @@
 // 无屏语音状态机，并保留局域网 Web 配置页（服务端地址/账号/密码等）。
 void headless_main() {
     ESP_LOGI(TAG, "Headless Voice Assistant starting...");
+
+    // 复位证据（Task 1）：最早位置记录本次复位原因与上次运行阶段/资源快照，
+    // 用于区分 Chat 未结束、TTS 建连/接收期间、还是播放启动前发生复位。
+    voice_diag::LogLastRunOnBoot();
 
     // 平台层：构建板对象。板级无屏裁剪在 boards/*/ 构造函数中完成：
     // 不初始化 LCD/LVGL、不初始化背光、禁用板级深睡关闭；同时把电源键

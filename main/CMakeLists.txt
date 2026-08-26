@@ -732,6 +732,7 @@ if(CONFIG_APP_MODE_HEADLESS_VOICE)
         "framework/headless_led_controller.cc"
         "framework/headless_network_controller.cc"
         "framework/audio_prompt_player.cc"
+        "framework/voice/voice_diagnostics.cc"
     )
 endif()
 

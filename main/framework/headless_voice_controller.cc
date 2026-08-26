@@ -14,6 +14,7 @@
 #include "headless_led_controller.h"
 #include "headless_network_controller.h"
 #include "audio_prompt_player.h"
+#include "voice/voice_diagnostics.h"
 
 #define TAG "HeadlessVoice"
 
@@ -170,6 +171,11 @@ void HeadlessVoiceController::HandlePress() {
     conversation_active_.store(true);
     led.ShowRecording();
 
+    // 诊断（Task 1）：本轮到当前 turnId，时间线从按下电源键开始
+    current_turn_id_ = next_turn_id_++;
+    timeline_.Reset(0);
+    DiagMark(voice_diag::Stage::kRecording, "ptt_down");
+
     std::vector<int16_t> mic24k;
     const size_t max_samples = kMaxRecordMs * (size_t)codec->input_sample_rate() / 1000;
     codec->EnableInput(true);
@@ -208,11 +214,15 @@ void HeadlessVoiceController::HandlePress() {
     }
     ESP_LOGI(TAG, "recording done: %u ms, %u samples",
              (unsigned)record_ms, (unsigned)mic24k.size());
+    DiagMark(voice_diag::Stage::kRecording, "ptt_up");
 
     // ---- 松开后链路：ASR → Chat → TTS → 播报 ----
     state_ = State::kProcessing;
     led.ShowProcessing();
     ProcessConversation(mic24k);
+
+    // 本轮流结束：打印整条时间线（含各子阶段耗时）
+    timeline_.Log(TAG);
 
     conversation_active_.store(false);
     state_ = State::kReady;
@@ -235,6 +245,7 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
     }
 
     // ASR：语音 → 文本
+    DiagMark(voice_diag::Stage::kAsr, "asr_request_start");
     std::string question;
     if (!ai.Transcribe(wav, question) || question.empty()) {
         ESP_LOGE(TAG, "asr failed or empty");
@@ -242,11 +253,18 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
         return;
     }
     ESP_LOGI(TAG, "asr ok: %s", question.c_str());
+    DiagMark(voice_diag::Stage::kAsr, "asr_final");
 
     // Chat：SSE 流式文本（增量在此累加，供 TTS 使用）
+    DiagMark(voice_diag::Stage::kChat, "chat_request_start");
     std::string reply;
     std::string conv_id;
+    bool first_chat_delta_logged = false;
     bool chat_ok = ai.Chat(question, [&](const char* delta) {
+        if (!first_chat_delta_logged) {
+            first_chat_delta_logged = true;
+            DiagMark(voice_diag::Stage::kChat, "chat_first_delta");
+        }
         reply += delta;
     }, conv_id);
     if (!chat_ok || reply.empty()) {
@@ -255,10 +273,17 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
         return;
     }
     ESP_LOGI(TAG, "chat ok, reply len=%u", (unsigned)reply.size());
+    DiagMark(voice_diag::Stage::kChat, "chat_done");
 
     // TTS：文本 → PCM，随后播报
+    DiagMark(voice_diag::Stage::kTts, "tts_request_start");
     std::vector<int16_t> tts_pcm;
+    bool first_tts_pcm_logged = false;
     bool tts_ok = ai.Synthesize(reply, [&](const int16_t* pcm, size_t n) {
+        if (!first_tts_pcm_logged) {
+            first_tts_pcm_logged = true;
+            DiagMark(voice_diag::Stage::kTts, "tts_first_pcm");
+        }
         tts_pcm.insert(tts_pcm.end(), pcm, pcm + n);
     });
     if (!tts_ok || tts_pcm.empty()) {
@@ -267,7 +292,9 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
         return;
     }
     ESP_LOGI(TAG, "tts ok, pcm=%u samples", (unsigned)tts_pcm.size());
+    DiagMark(voice_diag::Stage::kTts, "tts_done");
     SpeakPcm(tts_pcm);
+    DiagMark(voice_diag::Stage::kPlayback, "speaker_done");
 }
 
 void HeadlessVoiceController::HandleAiFailure() {
@@ -275,6 +302,9 @@ void HeadlessVoiceController::HandleAiFailure() {
     // 仍失败时按 token 是否还在区分登录失败与网络异常。
     auto& prompt = AudioPromptPlayer::Instance();
     auto& led = HeadlessLedController::Instance();
+    // 诊断：本轮异常结束，标注 Cancel 阶段并打印时间线/资源
+    DiagMark(voice_diag::Stage::kCancel, "turn_error");
+    timeline_.Log(TAG);
     if (!AiClient::Instance().TokenAvailable()) {
         led.ShowError();
         prompt.Play(AudioPromptPlayer::Prompt::kLoginFail);
@@ -284,6 +314,13 @@ void HeadlessVoiceController::HandleAiFailure() {
     }
     state_ = State::kReady;
     led.ShowReady();
+}
+
+void HeadlessVoiceController::DiagMark(voice_diag::Stage stage, const char* point) {
+    timeline_.Mark(point);
+    voice_diag::ResourceSnapshot res = voice_diag::CaptureResources(worker_);
+    voice_diag::SaveRtcSnapshot(stage, current_turn_id_, res);
+    voice_diag::LogResources(TAG, point, res);
 }
 
 bool HeadlessVoiceController::BuildWav(const std::vector<int16_t>& pcm, int rate,
@@ -340,6 +377,7 @@ void HeadlessVoiceController::SpeakPcm(const std::vector<int16_t>& pcm) {
     }
 
     codec->EnableOutput(true);
+    DiagMark(voice_diag::Stage::kPlayback, "speaker_first_pcm");
     const size_t chunk_samples = 1920;  // 80ms @24kHz
     for (size_t off = 0; off < pcm.size() && codec->output_enabled(); off += chunk_samples) {
         size_t n = std::min(chunk_samples, pcm.size() - off);
