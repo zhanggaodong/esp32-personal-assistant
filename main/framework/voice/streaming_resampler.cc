@@ -8,7 +8,9 @@ namespace voice {
 namespace {
 
 inline int32_t Clamp16(int32_t v) {
-    return std::max(-32768, std::min(32767, v));
+    const int32_t lo = -32768;
+    const int32_t hi = 32767;
+    return std::max(lo, std::min(hi, v));  // 两端同名类型，避免 int/int32_t 模板推导冲突
 }
 
 }  // namespace
