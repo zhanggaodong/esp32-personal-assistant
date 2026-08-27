@@ -16,10 +16,8 @@ inline int32_t Clamp16(int32_t v) {
 }  // namespace
 
 bool StreamingResampler::Configure(size_t src_rate, size_t dst_rate) {
-    if (src_rate == 0 || dst_rate == 0 || src_rate < dst_rate ||
-        src_rate % dst_rate != 0) {
-        // 只支持整数倍降采样（24k->16k、48k->16k 等），避免一般有理数重采样的
-        // 额外复杂度；后续需要更细粒度时可以单独扩展。
+    if (src_rate == 0 || dst_rate == 0 || src_rate < dst_rate) {
+        // 当前实现只做降采样；浮点相位允许 24k->16k 这类非整数比例。
         return false;
     }
     src_rate_ = src_rate;

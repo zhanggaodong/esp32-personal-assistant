@@ -425,11 +425,27 @@ void HeadlessVoiceController::BeginRecording() {
     DeviceLog::Log('I', "HeadlessVoice", "stream: turn.start 已发送，开始录音");
 
     // —— 录音与上行 ——
+    const size_t mic_rate = (size_t)codec->input_sample_rate();
+    if (!resampler_.Configure(mic_rate, 16000)) {
+        ESP_LOGE(TAG, "stream resampler config failed: %u -> 16000",
+                 (unsigned)mic_rate);
+        DeviceLog::Log('E', "HeadlessVoice",
+                       "stream: 重采样器配置失败(%u -> 16000)",
+                       (unsigned)mic_rate);
+        vc.CancelTurn(current_turn_id_, "resampler_config_error");
+        led.ShowError();
+        current_turn_id_ = 0;
+        conversation_active_.store(false);
+        ReturnToIdleState();
+        return;
+    }
+    ESP_LOGI(TAG, "stream resampler ready: %u -> 16000",
+             (unsigned)mic_rate);
+    DeviceLog::Log('I', "HeadlessVoice", "stream: 重采样器已就绪(%u -> 16000)",
+                   (unsigned)mic_rate);
     codec->EnableInput(true);
     state_ = State::kRecording;
 
-    resampler_.Configure((size_t)codec->input_sample_rate(), 16000);
-    resampler_.Reset();
     frame_buf_.clear();
     resample_buf_.clear();
     turn_seq_ = 0;
@@ -438,12 +454,11 @@ void HeadlessVoiceController::BeginRecording() {
     playback_.Clear();
     playback_.set_prebuffer_samples(voice::PcmPlaybackQueue::kPrebufferSamples);
     rec_start_ms_ = (uint64_t)NowMs();
-    const size_t mic_rate = (size_t)codec->input_sample_rate();
     const size_t chunk_samples = mic_rate / 50;  // 20ms
     const uint64_t max_ms = (uint64_t)max_rec * 1000;
     std::vector<int16_t> chunk(chunk_samples, 0);
     std::vector<int16_t> out;
-    bool mic_err = false;
+    const char* capture_error = nullptr;
     bool sent_any = false;
 
     while (ptt_held_.load() && network_connected_.load()) {
@@ -452,7 +467,7 @@ void HeadlessVoiceController::BeginRecording() {
         }
         chunk.assign(chunk_samples, 0);
         if (!codec->InputData(chunk)) {
-            mic_err = true;
+            capture_error = "mic_read_error";
             break;
         }
         resampler_.Process(chunk.data(), chunk.size(), out);
@@ -462,7 +477,7 @@ void HeadlessVoiceController::BeginRecording() {
         while (frame_buf_.size() >= kFrameSamples16k) {
             if (!vc.SendInputPcm(current_turn_id_, turn_seq_++, !sent_any, false,
                                  frame_buf_.data(), kFrameSamples16k)) {
-                mic_err = true;  // WebSocket 断开：SendInputPcm 失败
+                capture_error = "uplink_send_error";
                 goto capture_done;
             }
             sent_any = true;
@@ -474,13 +489,28 @@ capture_done:
     codec->EnableInput(false);
     const uint64_t elapsed_ms = (uint64_t)NowMs() - rec_start_ms_;
     if (!network_connected_.load()) {
-        mic_err = true;
+        capture_error = "network_lost";
     }
 
-    if (mic_err || (!sent_any && frame_buf_.empty())) {
+    if (capture_error == nullptr) {
+        resampler_.Flush(out);
+        frame_buf_.insert(frame_buf_.end(), out.begin(), out.end());
+        out.clear();
+    }
+
+    if (capture_error == nullptr && !sent_any && frame_buf_.empty()) {
+        capture_error = "no_pcm";
+    }
+    if (capture_error != nullptr) {
         // 输入异常 / 空数据 / 网络中断：丢弃本轮
-        ESP_LOGE(TAG, "mic error or uplink failure");
-        vc.CancelTurn(current_turn_id_, "capture_error");
+        ESP_LOGE(TAG, "stream capture failed: reason=%s fed=%u produced=%u",
+                 capture_error, (unsigned)resampler_.fed(),
+                 (unsigned)resampler_.produced());
+        DeviceLog::Log('E', "HeadlessVoice",
+                       "stream: 录音上行失败(%s, 输入=%u, 输出=%u)",
+                       capture_error, (unsigned)resampler_.fed(),
+                       (unsigned)resampler_.produced());
+        vc.CancelTurn(current_turn_id_, capture_error);
         led.ShowError();
         current_turn_id_ = 0;
         conversation_active_.store(false);
@@ -499,11 +529,34 @@ capture_done:
         return;
     }
     // 尾帧：不足一帧的剩余做最后一片（last=true）；恰好对齐则无尾帧，靠 turn.stop 收尾
-    if (!frame_buf_.empty()) {
-        vc.SendInputPcm(current_turn_id_, turn_seq_++, !sent_any, true,
-                        frame_buf_.data(), frame_buf_.size());
+    if (!frame_buf_.empty() &&
+        !vc.SendInputPcm(current_turn_id_, turn_seq_++, !sent_any, true,
+                         frame_buf_.data(), frame_buf_.size())) {
+        ESP_LOGE(TAG, "stream tail PCM send failed");
+        DeviceLog::Log('E', "HeadlessVoice", "stream: 录音尾帧发送失败");
+        vc.CancelTurn(current_turn_id_, "uplink_tail_send_error");
+        led.ShowError();
+        current_turn_id_ = 0;
+        conversation_active_.store(false);
+        ReturnToIdleState();
+        return;
     }
-    vc.StopTurn(current_turn_id_);
+    if (!vc.StopTurn(current_turn_id_)) {
+        ESP_LOGE(TAG, "stream turn.stop send failed");
+        DeviceLog::Log('E', "HeadlessVoice", "stream: turn.stop 发送失败");
+        vc.CancelTurn(current_turn_id_, "turn_stop_error");
+        led.ShowError();
+        current_turn_id_ = 0;
+        conversation_active_.store(false);
+        ReturnToIdleState();
+        return;
+    }
+    ESP_LOGI(TAG, "stream turn.stop sent: fed=%u produced=%u",
+             (unsigned)resampler_.fed(), (unsigned)resampler_.produced());
+    DeviceLog::Log('I', "HeadlessVoice",
+                   "stream: turn.stop 已发送(输入=%u, 输出=%u)",
+                   (unsigned)resampler_.fed(),
+                   (unsigned)resampler_.produced());
     DiagMark(voice_diag::Stage::kRecording, "ptt_up");
 
     // 等待后端校验/首字并并行播放

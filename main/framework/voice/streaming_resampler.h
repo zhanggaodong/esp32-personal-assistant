@@ -23,7 +23,8 @@ class StreamingResampler {
 public:
     StreamingResampler() = default;
 
-    // 配置源/目标采样率；失败（非法参数）返回 false 并保持原状态。
+    // 配置源/目标采样率；支持非整数比例降采样（如 24k -> 16k）。
+    // 失败（非法参数或升采样）返回 false 并保持原状态。
     bool Configure(size_t src_rate, size_t dst_rate);
 
     // 恢复到初始状态（清空相位与边界采样）。
