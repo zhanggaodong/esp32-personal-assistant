@@ -137,9 +137,11 @@ bool DeviceVoiceClient::DoConnect() {
 
     const std::string url = ai.VoiceSocketUrl();
     ESP_LOGI(TAG, "connecting to voice websocket ...");
+    DeviceLog::Log('I', "VoiceClient", "ws 正在连接服务器(升级握手)");
     if (ws_ == nullptr || !ws_->Connect(url.c_str())) {
         ESP_LOGE(TAG, "websocket connect failed, code=%d",
                  ws_ ? ws_->GetLastError() : -1);
+        DeviceLog::Log('E', "VoiceClient", "ws 连接失败(TCP/TLS 层)");
         std::lock_guard<std::mutex> lock(mutex_);
         ws_.reset();
         return false;
@@ -150,9 +152,12 @@ bool DeviceVoiceClient::DoConnect() {
                                            pdFALSE, pdFALSE,
                                            pdMS_TO_TICKS(kHelloTimeoutMs));
     if (bits & kHelloOkBit) {
+        DeviceLog::Log('I', "VoiceClient", "ws 握手成功");
         return true;
     }
     ESP_LOGE(TAG, "websocket handshake timeout/failed, bits=%u", (unsigned)bits);
+    DeviceLog::Log('E', "VoiceClient",
+                   bits & kHelloFailBit ? "ws 握手被服务器拒绝" : "ws 握手超时(多为反代未放行 WebSocket)");
     FireDisconnected("handshake_failed");
     return false;
 }

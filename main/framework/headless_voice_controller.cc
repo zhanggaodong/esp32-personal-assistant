@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <esp_log.h>
+#include <esp_system.h>
 #include <esp_timer.h>
 
 #include "board.h"
@@ -16,6 +17,7 @@
 #include "headless_led_controller.h"
 #include "headless_network_controller.h"
 #include "audio_prompt_player.h"
+#include "device_log.h"
 #include "voice/voice_diagnostics.h"
 
 #define TAG "HeadlessVoice"
@@ -73,6 +75,14 @@ bool AiConfigComplete() {
 
 }  // namespace
 
+// 协议切换后延迟重启：worker 主循环的模式在 Start() 时确定，
+// 运行中切换只会得到"半初始化"状态；延迟 1.5s 让网页响应先送达。
+void ProtocolChangeRestartTask(void*) {
+    DeviceLog::Log('I', "HeadlessVoice", "语音协议已切换，设备重启生效");
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_restart();
+}
+
 HeadlessVoiceController& HeadlessVoiceController::Instance() {
     static HeadlessVoiceController instance;
     return instance;
@@ -106,6 +116,13 @@ void HeadlessVoiceController::Start() {
         if (data == nullptr || strstr(static_cast<const char*>(data), "ai.") != nullptr) {
             AiClient::Instance().UpdateConfig();
             DeviceVoiceClient::Instance().UpdateConfig();
+            if (data != nullptr && strstr(static_cast<const char*>(data),
+                                          "ai.voice_protocol") != nullptr) {
+                // 事件回调线程不能直接 esp_restart（会掐断网页响应），
+                // 交给独立任务延迟执行。
+                xTaskCreate(ProtocolChangeRestartTask, "proto_restart", 4096,
+                            nullptr, 3, nullptr);
+            }
         }
     });
 
@@ -273,11 +290,13 @@ void HeadlessVoiceController::HandlePressStream() {
         return;
     }
     if (!AiConfigComplete()) {
+        DeviceLog::Log('W', "HeadlessVoice", "stream: AI 配置不完整，拒绝按键");
         led.ShowError();
         prompt.Play(AudioPromptPlayer::Prompt::kNeedServiceConfig);
         led.ShowReady();
         return;
     }
+    DeviceLog::Log('I', "HeadlessVoice", "stream: 开始连接 voice websocket");
     BeginRecording();  // 状态迁移在内部完成
 }
 
@@ -301,6 +320,7 @@ void HeadlessVoiceController::BeginRecording() {
     DeviceVoiceClient& vc = DeviceVoiceClient::Instance();
     if (!vc.EnsureConnected()) {
         ESP_LOGE(TAG, "voice websocket connect failed");
+        DeviceLog::Log('E', "HeadlessVoice", "stream: voice websocket 连接失败(检查服务器 ws 升级配置)");
         led.ShowError();
         prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
         state_ = State::kReady;
@@ -330,6 +350,7 @@ void HeadlessVoiceController::BeginRecording() {
 
     if (!vc.StartTurn(current_turn_id_, conv, voice, "zh-CN", (uint32_t)max_rec)) {
         ESP_LOGE(TAG, "turn.start failed");
+        DeviceLog::Log('E', "HeadlessVoice", "stream: turn.start 发送失败");
         led.ShowError();
         prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
         state_ = State::kReady;
