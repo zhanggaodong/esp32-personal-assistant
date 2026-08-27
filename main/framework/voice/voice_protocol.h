@@ -27,6 +27,9 @@ constexpr size_t kMaxPayloadBytes = 32 * 1024;
 // 二进制帧头长度：magic(2) + type(1) + flags(1) + turn_id(4) + sequence(4) + payload_size(4)。
 constexpr size_t kFrameHeaderSize = 16;
 
+// 上行帧序号：uint32，每个 turn 从 0 开始，每个上行帧加 1。
+// （下行 TTS 帧由后端自行从 1 编号，与本字段语义互不影响。）
+
 // 二进制帧类型。
 enum class FrameType : uint8_t {
     kInputPcm = 1,    // 上行：设备 -> 后端
