@@ -135,7 +135,11 @@ void HeadlessVoiceController::Start() {
 
     state_ = State::kWaitWifi;
     booted_ = true;
-    if (xTaskCreate(WorkerTask, "headless_voice", 8192, this, 5, &worker_) != pdPASS) {
+    // 栈 26KB：opus 解码（libopus）需要大栈，小智同款配置为 2048*13=26624。
+    // 之前用 8KB，Opus 上线后解码阶段必然栈溢出（表现为 TTS 一起播就重启）。
+    // ASR/Chat/TTS HTTP 路径栈占用小（水位 >3.5KB），大栈只是保险。
+    if (xTaskCreate(WorkerTask, "headless_voice", 26624, this, 5, &worker_) !=
+        pdPASS) {
         ESP_LOGE(TAG, "failed to create headless voice worker");
         return;
     }

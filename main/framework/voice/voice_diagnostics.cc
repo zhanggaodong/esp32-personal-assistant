@@ -130,8 +130,12 @@ int64_t Timeline::ElapsedSince(const char* name) const {
 
 void Timeline::Log(const char* tag) const {
     for (size_t i = 0; i < count_; ++i) {
-        ESP_LOGI(tag, "  [%zu] %s +%lldms", i, points_[i].name,
-                 (long long)(points_[i].ts_ms - origin_ms_));
+        // 固件启用了 CONFIG_NEWLIB_NANO_FORMAT：printf 不支持 %lld/%zu。
+        // %lld 只消费 32 位参数，会让后面的 %s 读到 long long 的高半字
+        // （恰为 0）→ strlen(NULL) → LoadProhibited 崩溃（每轮播完即重启
+        // 的根因）。时间偏移远小于 2^31ms，用 %d 安全。
+        ESP_LOGI(tag, "  [%u] %s +%dms", (unsigned)i, points_[i].name,
+                 (int)(points_[i].ts_ms - origin_ms_));
     }
     if (dropped_ > 0) {
         ESP_LOGW(tag, "timeline dropped %u points (cap %u)", (unsigned)dropped_,
