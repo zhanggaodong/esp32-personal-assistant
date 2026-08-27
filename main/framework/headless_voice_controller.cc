@@ -37,6 +37,12 @@ constexpr size_t kFrameSamples16k = 1600;
 // 等待 turn.done 的看门狗上限（超过则强制结束本轮）
 constexpr uint64_t kTurnDeadlineMs = 120000;
 
+// turn.error 展示给网页日志的 message 上限（UTF-8 字节），防止异常响应撑爆日志。
+constexpr size_t kMaxTurnErrorMessageBytes = 160;
+
+// 用户最终识别文本的展示上限：约前 100 个汉字（UTF-8 下 300 字节）。
+constexpr size_t kMaxUserTextLogBytes = 300;
+
 // 播放出队块：80ms @24kHz
 constexpr size_t kPlaybackChunkSamples = 1920;
 
@@ -635,6 +641,15 @@ void HeadlessVoiceController::OnEvent(const voice::ServerMessage& msg) {
             ESP_LOGI(TAG, "asr partial: %.*s", (int)std::min<size_t>(msg.text.size(), 200),
                      msg.text.c_str());
             break;
+        case voice::MessageType::kAsrFinal: {
+            // 最终识别文本：网页日志可见（约前 100 字，防止超长撑爆日志）。
+            const int shown = static_cast<int>(
+                std::min<size_t>(msg.text.size(), kMaxUserTextLogBytes));
+            ESP_LOGI(TAG, "asr final: %.*s", shown, msg.text.c_str());
+            DeviceLog::Log('I', "HeadlessVoice", "stream: ASR 完成: %.*s",
+                           shown, msg.text.c_str());
+            break;
+        }
         case voice::MessageType::kChatDelta: {
             // 仅日志，后端才累积完整答案
             if (!first_chat_delta_logged_) {
@@ -656,12 +671,24 @@ void HeadlessVoiceController::OnEvent(const voice::ServerMessage& msg) {
                 xQueueSend(event_queue_, &e, 0);
             }
             break;
-        case voice::MessageType::kTurnError:
+        case voice::MessageType::kTurnError: {
+            // 服务端错误详情必须可见：phase/code/受限 message，便于网页日志定位。
+            const int shown =
+                static_cast<int>(std::min<size_t>(msg.message.size(),
+                                                  kMaxTurnErrorMessageBytes));
+            ESP_LOGE(TAG, "turn error: phase=%s code=%s message=%.*s",
+                     msg.phase.c_str(), msg.code.c_str(), shown,
+                     msg.message.c_str());
+            DeviceLog::Log('E', "HeadlessVoice",
+                           "stream: 服务端失败(%s/%s): %.*s",
+                           msg.phase.c_str(), msg.code.c_str(), shown,
+                           msg.message.c_str());
             if (event_queue_ != nullptr) {
                 Event e = Event::kTurnError;
                 xQueueSend(event_queue_, &e, 0);
             }
             break;
+        }
         case voice::MessageType::kTurnCancelled:
         case voice::MessageType::kTurnReady:
         case voice::MessageType::kTtsSentence:

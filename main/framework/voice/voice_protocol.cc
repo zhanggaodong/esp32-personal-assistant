@@ -285,7 +285,10 @@ bool ParseServerMessage(const char* json, size_t len, ServerMessage& out) {
             GetStr(root, "conversationId", out.conversation_id);
             break;
         case MessageType::kTurnError:
-            GetStr(root, "stage", out.stage);
+            // 正式字段为 phase；缺失时回退读旧服务端的 stage（过渡兼容，最终移除）。
+            if (!GetStr(root, "phase", out.phase)) {
+                GetStr(root, "stage", out.phase);
+            }
             GetStr(root, "code", out.code);
             GetStr(root, "message", out.message);
             break;

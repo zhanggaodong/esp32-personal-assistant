@@ -123,7 +123,7 @@ struct ServerMessage {
     uint32_t sequence = 0;       // tts.sentence 序号
     std::string conversation_id; // turn.done
 
-    std::string stage;           // turn.error
+    std::string phase;           // turn.error：出错阶段（asr/chat/tts/protocol...）
     std::string code;
     std::string message;
 };
