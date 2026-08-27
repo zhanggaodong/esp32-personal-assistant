@@ -776,7 +776,6 @@ void HeadlessVoiceController::PlaybackLoop() {
                 DeviceLog::Log('W', "HeadlessVoice", "stream: 播放缓冲断档(等待音频)");
             }
         }
-        }
     }
 }
 
