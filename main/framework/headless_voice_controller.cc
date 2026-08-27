@@ -34,6 +34,11 @@ constexpr size_t kMicChunkSamples = 480;
 // 流式路径一帧 = 100ms @16kHz = 1600 采样点（16bit/单声道 = 3200 字节）
 constexpr size_t kFrameSamples16k = 1600;
 
+// stream_v1 起播预缓冲：后端逐句串行合成时句间会插入 MiMo 的
+// firstAudio 延迟（实测 42~682ms 波动），起播线过薄会让播放队列在
+// 句间打空，表现为"断断续续"。600ms 与 legacy 路径一致。
+constexpr size_t kStreamPrebufferMs = 600;
+
 // 等待 turn.done 的看门狗上限（超过则强制结束本轮）
 constexpr uint64_t kTurnDeadlineMs = 120000;
 
@@ -466,7 +471,7 @@ void HeadlessVoiceController::BeginRecording() {
     // 复位下行队列：清掉上一轮残留的 end_of_stream 标记。否则新一轮首帧
     // 到达前的瞬时空队列会被误判为"上一轮已播完"，提前发出 kPlaybackEnd。
     playback_.Clear();
-    playback_.set_prebuffer_samples(voice::PcmPlaybackQueue::kPrebufferSamples);
+    playback_.set_prebuffer_samples(24000 * kStreamPrebufferMs / 1000);
     rec_start_ms_ = (uint64_t)NowMs();
     const size_t chunk_samples = mic_rate / 50;  // 20ms
     const uint64_t max_ms = (uint64_t)max_rec * 1000;
@@ -728,6 +733,7 @@ void HeadlessVoiceController::PlaybackLoop() {
     std::vector<int16_t> chunk;
     bool output_on = false;
     bool end_posted = false;
+    int64_t last_starve_log_ms = 0;
     for (;;) {
         xTaskNotifyWait(0, 0xFFFFFFFFUL, nullptr, pdMS_TO_TICKS(40));  // 轮询兜底
 
@@ -759,6 +765,17 @@ void HeadlessVoiceController::PlaybackLoop() {
                     xQueueSend(event_queue_, &e, 0);
                 }
             }
+        } else if (output_on) {
+            // 正在播放却取不到数据 = 上游供给断档（下溢）。限频 1s 记录，
+            // 网页日志可见——"断断续续"类反馈可直接据此定位。
+            const int64_t now = NowMs();
+            if (now - last_starve_log_ms >= 1000) {
+                last_starve_log_ms = now;
+                ESP_LOGW(TAG, "playback underrun: buffered=%u samples",
+                         (unsigned)playback_.BufferedSamples());
+                DeviceLog::Log('W', "HeadlessVoice", "stream: 播放缓冲断档(等待音频)");
+            }
+        }
         }
     }
 }
