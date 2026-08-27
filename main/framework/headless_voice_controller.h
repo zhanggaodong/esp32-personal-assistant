@@ -35,6 +35,10 @@ public:
     void OnPttPressed();
     void OnPttReleased();
 
+    // 网络回调线程调用。stream_v1 通过事件队列把状态迁移交给语音工作线程，
+    // 避免 Wi-Fi 已连但状态机仍停在 kWaitWifi，导致 PTT 被静默忽略。
+    void OnNetworkConnectivityChanged(bool connected);
+
 private:
     enum class State {
         kBoot,        // 启动中（忽略按键）
@@ -56,6 +60,8 @@ private:
         kTurnError,     // 后端 turn.error
         kDisconnected,  // WebSocket 断开
         kPlaybackEnd,   // 播放队列已播空且 EOS（一轮输出结束）
+        kNetworkConnected,     // Wi-Fi 已获得 IP，可开始新一轮
+        kNetworkUnavailable,   // Wi-Fi 断开、扫描或进入配网，不可开始新一轮
     };
 
     HeadlessVoiceController() = default;
@@ -78,6 +84,7 @@ private:
     void CancelActiveTurn();   // 插话/断线：cancel + 清队列 + 关输出
     void HandleEvent(Event e); // 集中处理状态迁移
     void HandleTurnEnd(bool success);  // 一轮结束：成功(播完排空)或失败(报错)统一收尾
+    void ReturnToIdleState();  // 按实时网络状态回到 ready/wait_wifi，并同步 LED
 
     // —— legacy 路径（保留）——
     void HandlePressLegacy();
@@ -97,6 +104,7 @@ private:
     std::atomic_bool ptt_held_{false};     // 电源键是否仍按住
     std::atomic_bool speaking_{false};     // 正在播报 TTS（供提示音避让）
     std::atomic_bool conversation_active_{false};  // 一轮对话（录音→播报）进行中（legacy 与 stream 共用）
+    std::atomic_bool network_connected_{false};  // 网络回调即时更新，供收尾选择空闲状态
     TaskHandle_t worker_ = nullptr;
     TaskHandle_t playback_task_ = nullptr;
     QueueHandle_t event_queue_ = nullptr;  // stream_v1 事件队列（Event 类型）

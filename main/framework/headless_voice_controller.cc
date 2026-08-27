@@ -126,7 +126,8 @@ void HeadlessVoiceController::Start() {
         }
     });
 
-    if (UseStream()) {
+    const bool use_stream = UseStream();
+    if (use_stream) {
         DeviceVoiceClient& vc = DeviceVoiceClient::Instance();
         vc.SetPcmCallback([this](uint32_t turn_id, uint32_t sequence, bool first,
                                  bool last, const int16_t* pcm, size_t count) {
@@ -138,8 +139,11 @@ void HeadlessVoiceController::Start() {
         event_queue_ = xQueueCreate(16, sizeof(Event));
         if (event_queue_ == nullptr) {
             ESP_LOGE(TAG, "failed to create event queue");
+            DeviceLog::Log('E', "HeadlessVoice", "stream: 事件队列创建失败");
             return;
         }
+        ESP_LOGI(TAG, "stream initialized, waiting for WiFi readiness");
+        DeviceLog::Log('I', "HeadlessVoice", "stream: 已初始化，等待 WiFi 就绪");
     }
 
     // 播放线程两种模式共用：stream_v1 下行走 playback_ 队列，legacy TTS
@@ -151,16 +155,18 @@ void HeadlessVoiceController::Start() {
     }
 
     state_ = State::kWaitWifi;
-    booted_ = true;
     // 栈 26KB：opus 解码（libopus）需要大栈，小智同款配置为 2048*13=26624。
     // 之前用 8KB，Opus 上线后解码阶段必然栈溢出（表现为 TTS 一起播就重启）。
     // ASR/Chat/TTS HTTP 路径栈占用小（水位 >3.5KB），大栈只是保险。
     if (xTaskCreate(WorkerTask, "headless_voice", 26624, this, 5, &worker_) !=
         pdPASS) {
         ESP_LOGE(TAG, "failed to create headless voice worker");
+        DeviceLog::Log('E', "HeadlessVoice", "语音工作线程创建失败，PTT 已禁用");
         return;
     }
-    ESP_LOGI(TAG, "headless voice started (PTT: press=record, release=submit)");
+    booted_ = true;
+    ESP_LOGI(TAG, "headless voice started (PTT: press=record, release=submit, protocol=%s)",
+             use_stream ? "stream_v1" : "legacy");
 }
 
 // ---------------------------------------------------------------------------
@@ -174,8 +180,18 @@ void HeadlessVoiceController::OnPttPressed() {
     if (UseStream()) {
         ptt_held_.store(true);
         Event e = Event::kPress;
-        if (event_queue_ != nullptr) {
-            xQueueSend(event_queue_, &e, 0);
+        if (event_queue_ == nullptr) {
+            ESP_LOGE(TAG, "stream PTT ignored: event queue is not initialized");
+            DeviceLog::Log('E', "HeadlessVoice",
+                           "stream: PTT 被忽略，事件队列未初始化（请确认切换后已重启）");
+            return;
+        }
+        if (xQueueSend(event_queue_, &e, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "stream PTT ignored: event queue is full");
+            DeviceLog::Log('W', "HeadlessVoice", "stream: PTT 被忽略，事件队列已满");
+        } else {
+            ESP_LOGI(TAG, "stream PTT press queued");
+            DeviceLog::Log('I', "HeadlessVoice", "stream: PTT 按下事件已入队");
         }
         return;
     }
@@ -195,7 +211,30 @@ void HeadlessVoiceController::OnPttReleased() {
     ptt_held_.store(false);  // 录音循环据此停止采集；流式路径由状态机感知
     if (UseStream() && event_queue_ != nullptr) {
         Event e = Event::kRelease;
-        xQueueSend(event_queue_, &e, 0);
+        if (xQueueSend(event_queue_, &e, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "stream PTT release event dropped: event queue is full");
+            DeviceLog::Log('W', "HeadlessVoice", "stream: PTT 松开事件丢失，事件队列已满");
+        } else {
+            ESP_LOGI(TAG, "stream PTT release queued");
+            DeviceLog::Log('I', "HeadlessVoice", "stream: PTT 松开事件已入队");
+        }
+    }
+}
+
+void HeadlessVoiceController::OnNetworkConnectivityChanged(bool connected) {
+    network_connected_.store(connected);
+    if (!booted_.load() || !UseStream()) {
+        return;
+    }
+    if (event_queue_ == nullptr) {
+        ESP_LOGE(TAG, "stream network event dropped: event queue is not initialized");
+        DeviceLog::Log('E', "HeadlessVoice", "stream: 网络状态事件丢失，事件队列未初始化");
+        return;
+    }
+    Event e = connected ? Event::kNetworkConnected : Event::kNetworkUnavailable;
+    if (xQueueSend(event_queue_, &e, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "stream network event dropped: event queue is full");
+        DeviceLog::Log('W', "HeadlessVoice", "stream: 网络状态事件丢失，事件队列已满");
     }
 }
 
@@ -244,6 +283,10 @@ void HeadlessVoiceController::HandleEvent(Event e) {
         case State::kReady:
             if (e == Event::kPress) {
                 HandlePressStream();  // 内部同步完成一轮（录音→等回复→播完）
+            } else if (e == Event::kNetworkUnavailable) {
+                state_ = State::kWaitWifi;
+                ESP_LOGW(TAG, "stream state ready -> wait_wifi");
+                DeviceLog::Log('W', "HeadlessVoice", "stream: WiFi 不可用，暂停 PTT");
             }
             break;
         case State::kWaitingAsr:
@@ -260,13 +303,27 @@ void HeadlessVoiceController::HandleEvent(Event e) {
             } else if (e == Event::kDisconnected) {
                 CancelActiveTurn();
                 HandleTurnEnd(false);
+            } else if (e == Event::kNetworkUnavailable) {
+                ESP_LOGW(TAG, "stream network lost, cancelling active turn");
+                DeviceLog::Log('W', "HeadlessVoice", "stream: WiFi 已断开，取消当前轮次");
+                CancelActiveTurn();
+                HandleTurnEnd(false);
             } else if (e == Event::kPlaybackEnd) {
                 HandleTurnEnd(true);
             }
             break;
+        case State::kWaitWifi:
+            if (e == Event::kNetworkConnected) {
+                state_ = State::kReady;
+                ESP_LOGI(TAG, "stream state wait_wifi -> ready, PTT enabled");
+                DeviceLog::Log('I', "HeadlessVoice", "stream: WiFi 已就绪，PTT 可用");
+            } else if (e == Event::kPress) {
+                ESP_LOGW(TAG, "stream PTT ignored: waiting for WiFi");
+                DeviceLog::Log('W', "HeadlessVoice", "stream: PTT 被忽略，正在等待 WiFi");
+            }
+            break;
         case State::kRecording:
         case State::kBoot:
-        case State::kWaitWifi:
         case State::kCancelling:
         case State::kProcessing:
             break;  // 录音在 BeginRecording 内同步进行；其余事件忽略
@@ -284,18 +341,22 @@ void HeadlessVoiceController::HandlePressStream() {
 
     // 前置：联网且不在配网；配置完整
     if (!net.IsConnected() || net.IsProvisioning()) {
+        ESP_LOGW(TAG, "stream PTT rejected: network is not ready");
+        DeviceLog::Log('W', "HeadlessVoice", "stream: 网络未就绪，拒绝按键");
         led.ShowError();
         prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
         led.ShowReady();
         return;
     }
     if (!AiConfigComplete()) {
+        ESP_LOGW(TAG, "stream PTT rejected: AI config incomplete");
         DeviceLog::Log('W', "HeadlessVoice", "stream: AI 配置不完整，拒绝按键");
         led.ShowError();
         prompt.Play(AudioPromptPlayer::Prompt::kNeedServiceConfig);
         led.ShowReady();
         return;
     }
+    ESP_LOGI(TAG, "stream starting voice websocket connection");
     DeviceLog::Log('I', "HeadlessVoice", "stream: 开始连接 voice websocket");
     BeginRecording();  // 状态迁移在内部完成
 }
@@ -305,6 +366,8 @@ void HeadlessVoiceController::BeginRecording() {
     auto& prompt = AudioPromptPlayer::Instance();
     auto* codec = Board::GetInstance().GetAudioCodec();
     if (codec == nullptr) {
+        ESP_LOGE(TAG, "stream cannot record: audio codec is unavailable");
+        DeviceLog::Log('E', "HeadlessVoice", "stream: 音频设备不可用，无法录音");
         led.ShowError();
         prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
         led.ShowReady();
@@ -323,9 +386,9 @@ void HeadlessVoiceController::BeginRecording() {
         DeviceLog::Log('E', "HeadlessVoice", "stream: voice websocket 连接失败(检查服务器 ws 升级配置)");
         led.ShowError();
         prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
-        state_ = State::kReady;
+        current_turn_id_ = 0;
         conversation_active_.store(false);
-        led.ShowReady();
+        ReturnToIdleState();
         return;
     }
 
@@ -353,11 +416,13 @@ void HeadlessVoiceController::BeginRecording() {
         DeviceLog::Log('E', "HeadlessVoice", "stream: turn.start 发送失败");
         led.ShowError();
         prompt.Play(AudioPromptPlayer::Prompt::kNetworkError);
-        state_ = State::kReady;
+        current_turn_id_ = 0;
         conversation_active_.store(false);
-        led.ShowReady();
+        ReturnToIdleState();
         return;
     }
+    ESP_LOGI(TAG, "stream turn.start sent: turn=%u", (unsigned)current_turn_id_);
+    DeviceLog::Log('I', "HeadlessVoice", "stream: turn.start 已发送，开始录音");
 
     // —— 录音与上行 ——
     codec->EnableInput(true);
@@ -381,7 +446,7 @@ void HeadlessVoiceController::BeginRecording() {
     bool mic_err = false;
     bool sent_any = false;
 
-    while (ptt_held_.load()) {
+    while (ptt_held_.load() && network_connected_.load()) {
         if (((uint64_t)NowMs() - rec_start_ms_) >= max_ms) {
             break;  // 达到配置上限，自动走"松开"路径
         }
@@ -408,15 +473,18 @@ void HeadlessVoiceController::BeginRecording() {
 capture_done:
     codec->EnableInput(false);
     const uint64_t elapsed_ms = (uint64_t)NowMs() - rec_start_ms_;
+    if (!network_connected_.load()) {
+        mic_err = true;
+    }
 
     if (mic_err || (!sent_any && frame_buf_.empty())) {
         // 输入异常 / 空数据 / 网络中断：丢弃本轮
         ESP_LOGE(TAG, "mic error or uplink failure");
         vc.CancelTurn(current_turn_id_, "capture_error");
         led.ShowError();
-        state_ = State::kReady;
+        current_turn_id_ = 0;
         conversation_active_.store(false);
-        led.ShowReady();
+        ReturnToIdleState();
         timeline_.Log(TAG);
         return;
     }
@@ -425,9 +493,9 @@ capture_done:
         vc.CancelTurn(current_turn_id_, "too_short");
         prompt.Play(AudioPromptPlayer::Prompt::kNoSpeech);
         led.ShowError();
-        state_ = State::kReady;
+        current_turn_id_ = 0;
         conversation_active_.store(false);
-        led.ShowReady();
+        ReturnToIdleState();
         return;
     }
     // 尾帧：不足一帧的剩余做最后一片（last=true）；恰好对齐则无尾帧，靠 turn.stop 收尾
@@ -471,8 +539,18 @@ void HeadlessVoiceController::HandleTurnEnd(bool success) {
     }
     conversation_active_.store(false);
     current_turn_id_ = 0;
-    state_ = State::kReady;
-    led.ShowReady();
+    ReturnToIdleState();
+}
+
+void HeadlessVoiceController::ReturnToIdleState() {
+    auto& led = HeadlessLedController::Instance();
+    if (network_connected_.load()) {
+        state_ = State::kReady;
+        led.ShowReady();
+    } else {
+        state_ = State::kWaitWifi;
+        led.ShowWifiConnecting();
+    }
 }
 
 void HeadlessVoiceController::OnPcm(uint32_t turn_id, uint32_t /*sequence*/,

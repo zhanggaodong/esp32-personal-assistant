@@ -69,8 +69,13 @@ void headless_main() {
     // 配置中心（NVS 持久化）
     ConfigStore::Instance().Init();
 
-    // 网络事件 → 无屏控制器（本地提示音 + LED），不再依赖 Application/Display
+    // 网络事件同时驱动本地提示和 stream_v1 状态机。状态机只从其工作线程
+    // 修改 state_，网络回调仅投递就绪/不可用事件，避免 PTT 长期卡在 kWaitWifi。
     board.SetNetworkEventCallback([](NetworkEvent event, const std::string& data) {
+        // 语音侧先更新原子网络标记；本地联网/断网提示可能同步播放数秒，
+        // 不能让提示音延迟 stream_v1 的就绪或停止采集。
+        HeadlessVoiceController::Instance().OnNetworkConnectivityChanged(
+            event == NetworkEvent::Connected);
         HeadlessNetworkController::Instance().OnNetworkEvent(event, data);
     });
 

@@ -152,6 +152,7 @@ bool DeviceVoiceClient::DoConnect() {
                                            pdFALSE, pdFALSE,
                                            pdMS_TO_TICKS(kHelloTimeoutMs));
     if (bits & kHelloOkBit) {
+        ESP_LOGI(TAG, "websocket handshake complete");
         DeviceLog::Log('I', "VoiceClient", "ws 握手成功");
         return true;
     }
