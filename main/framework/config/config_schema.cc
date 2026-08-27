@@ -17,6 +17,10 @@ const ConfigItem kConfigSchema[] = {
     {"ai.password", "密码", ConfigType::kPassword, "zxc123", nullptr, "AI服务"},
     {"ai.voice", "朗读音色", ConfigType::kEnum, "mimo_default",
      "mimo_default|冰糖|茉莉|苏打|白桦|Mia|Chloe|Milo|Dean", "AI服务"},
+    {"ai.max_record_seconds", "最长录音秒数", ConfigType::kEnum, "30",
+     "15|30|60", "AI服务"},
+    {"ai.voice_protocol", "语音协议", ConfigType::kEnum, "legacy",
+     "legacy|stream_v1", "AI服务"},
 };
 
 #else  // 屏幕版（Framework / 原始小智回退构建）

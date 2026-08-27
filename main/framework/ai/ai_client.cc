@@ -298,7 +298,9 @@ bool DecodeOpusStream(esp_http_client_handle_t client,
         std::vector<uint8_t> opus(payload.begin(), payload.end());
         std::vector<int16_t> pcm;
         if (!decoder.Decode(std::move(opus), pcm)) {
-            continue;  // 单帧损坏容忍，继续下一帧
+            // 单帧解码失败会丢失 60ms 音频（听感为一个字被吞），记录下来便于统计
+            ESP_LOGW(TAG, "opus frame decode failed, skipped (len=%u)", len);
+            continue;
         }
         if (!pcm.empty() && on_pcm) {
             on_pcm(pcm.data(), pcm.size());

@@ -31,7 +31,8 @@ FrameParseResult DecodeBinaryFrame(const uint8_t* data, size_t len,
 
     const uint8_t type = data[2];
     if (type != static_cast<uint8_t>(FrameType::kInputPcm) &&
-        type != static_cast<uint8_t>(FrameType::kOutputPcm)) {
+        type != static_cast<uint8_t>(FrameType::kOutputPcm) &&
+        type != static_cast<uint8_t>(FrameType::kOutputOpus)) {
         return FrameParseResult::kBadType;
     }
 
@@ -134,6 +135,8 @@ std::string BuildTurnStart(uint32_t turn_id, const std::string& conversation_id,
     cJSON_AddStringToObject(root, "voice", voice.c_str());
     cJSON_AddStringToObject(root, "language", language.c_str());
     AddU32(root, "maxRecordSeconds", max_record_seconds);
+    // 请求下行 opus（60ms/24kHz/单声道）。旧后端会忽略未知字段并回退 PCM 帧。
+    cJSON_AddStringToObject(root, "audioCodec", "opus");
 
     char* s = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

@@ -454,11 +454,23 @@ void HeadlessVoiceController::HandleTurnEnd(bool success) {
     led.ShowReady();
 }
 
-void HeadlessVoiceController::OnPcm(uint32_t /*turn_id*/, uint32_t /*sequence*/,
+void HeadlessVoiceController::OnPcm(uint32_t turn_id, uint32_t /*sequence*/,
                                     bool /*first*/, bool /*last*/,
                                     const int16_t* pcm, size_t count) {
-    // turn_id 过滤已由 DeviceVoiceClient 依据 active_turn 完成；此处只入队
-    playback_.Push(pcm, count);  // 固定容量，满了丢弃（背压）
+    // 队列满时阻塞等待而非丢弃：解码任务（或 WS 接收线程）在此形成背压，
+    // 逐级传导回服务器，杜绝长回答音频被队列上限截断。
+    // 每次入队前先复查轮次：等待期间被插话/取消的旧轮，剩余帧直接丢弃。
+    for (;;) {
+        if (turn_id != 0 &&
+            DeviceVoiceClient::Instance().ActiveTurnId() != turn_id) {
+            return;
+        }
+        if (playback_.Push(pcm, count) !=
+            voice::PcmPlaybackQueue::PushResult::kFull) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
     if (playback_task_ != nullptr) {
         xTaskNotifyGive(playback_task_);
     }
@@ -704,7 +716,7 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
     // 生产者等待（背压），不丢块；EOS 后播放线程排空到空。喂入速率低于实时
     // 时表现为首声稍晚，而不是直写模式那种饥饿断流/缺词。
     playback_.Clear();
-    playback_.set_prebuffer_samples(24000 * 400 / 1000);  // 400ms @24kHz
+    playback_.set_prebuffer_samples(24000 * 600 / 1000);  // 600ms @24kHz：opus 喂入极快，多攒抗网络停顿
     bool first_tts_pcm = false;
     bool tts_ok = ai.Synthesize(reply, [&](const int16_t* pcm, size_t n) {
         if (!first_tts_pcm) {

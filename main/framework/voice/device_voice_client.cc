@@ -4,6 +4,9 @@
 #include <esp_timer.h>
 #include <web_socket.h>
 
+// opus 下行解码（78/esp-opus-encoder 组件；解码需大栈，故在专用任务中执行）
+#include <opus_decoder.h>
+
 #include "../ai/ai_client.h"
 #include "../device_log.h"
 #include "board.h"
@@ -39,6 +42,10 @@ void DeviceVoiceClient::UpdateConfig() {
     std::lock_guard<std::mutex> lock(mutex_);
     ws_.reset();  // 配置变更后旧连接一律作废
     active_turn_.store(0);
+    {
+        std::lock_guard<std::mutex> dec_lock(dec_mutex_);
+        dec_queue_.clear();  // 丢弃未解码的旧格式帧
+    }
 }
 
 bool DeviceVoiceClient::IsConnected() const {
@@ -268,6 +275,14 @@ void DeviceVoiceClient::HandleBinary(const char* data, size_t len) {
         FireDisconnected("bad_frame");
         return;
     }
+    if (frame.type == voice::FrameType::kOutputOpus) {
+        // opus 帧：只入队，解码在专用大栈任务中做（libopus 吃栈，
+        // WS 接收任务仅 4KB 栈，绝不能在这里直接解码）。
+        if (frame.turn_id == active_turn_.load()) {
+            EnqueueOpusFrame(frame.turn_id, frame.payload, frame.payload_size);
+        }
+        return;
+    }
     if (frame.type != voice::FrameType::kOutputPcm) {
         return;  // 上行帧不会由服务端下发，忽略
     }
@@ -284,6 +299,79 @@ void DeviceVoiceClient::HandleBinary(const char* data, size_t len) {
     if (cb) {
         cb(frame.turn_id, frame.sequence, frame.first(), frame.last(),
            reinterpret_cast<const int16_t*>(frame.payload), samples);
+    }
+}
+
+void DeviceVoiceClient::EnqueueOpusFrame(uint32_t turn_id,
+                                         const uint8_t* data, size_t len) {
+    if (len == 0) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(dec_mutex_);
+        if (dec_queue_.size() >= kMaxQueuedOpusFrames) {
+            // 解码跟不上时丢最旧：追上实时比保住历史更重要
+            dec_queue_.pop_front();
+        }
+        PendingOpusFrame frame;
+        frame.data.assign(data, data + len);
+        frame.turn_id = turn_id;
+        dec_queue_.push_back(std::move(frame));
+    }
+    if (dec_task_ == nullptr) {
+        // 惰性创建、常驻。26KB 栈与小智的 opus 编解码任务一致（libopus 需要）。
+        if (xTaskCreate(OpusDecodeTaskTrampoline, "opus_dec", 26624, this, 5,
+                        &dec_task_) != pdPASS) {
+            ESP_LOGE(TAG, "failed to create opus decode task");
+            return;
+        }
+    }
+    xTaskNotifyGive(dec_task_);
+}
+
+void DeviceVoiceClient::OpusDecodeTaskTrampoline(void* arg) {
+    static_cast<DeviceVoiceClient*>(arg)->OpusDecodeLoop();
+    vTaskDelete(nullptr);
+}
+
+void DeviceVoiceClient::OpusDecodeLoop() {
+    for (;;) {
+        ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(100));
+        for (;;) {
+            PendingOpusFrame frame;
+            {
+                std::lock_guard<std::mutex> lock(dec_mutex_);
+                if (dec_queue_.empty()) {
+                    break;
+                }
+                frame = std::move(dec_queue_.front());
+                dec_queue_.pop_front();
+            }
+            if (!tts_decoder_) {
+                tts_decoder_ = std::make_unique<OpusDecoderWrapper>(24000, 1, 60);
+            }
+            if (frame.turn_id != decoded_turn_) {
+                decoded_turn_ = frame.turn_id;
+                tts_decoder_->ResetState();  // 新一轮从干净解码状态开始
+            }
+            std::vector<int16_t> pcm;
+            if (!tts_decoder_->Decode(std::move(frame.data), pcm) ||
+                pcm.empty()) {
+                continue;
+            }
+            // 插话/取消后 active_turn 已变，过期输出直接丢弃（不入播放队列）
+            if (frame.turn_id != active_turn_.load()) {
+                continue;
+            }
+            OnPcmFn cb;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                cb = on_pcm_;
+            }
+            if (cb) {
+                cb(frame.turn_id, 0, false, false, pcm.data(), pcm.size());
+            }
+        }
     }
 }
 

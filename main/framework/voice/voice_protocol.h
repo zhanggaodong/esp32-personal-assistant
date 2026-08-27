@@ -29,8 +29,9 @@ constexpr size_t kFrameHeaderSize = 16;
 
 // 二进制帧类型。
 enum class FrameType : uint8_t {
-    kInputPcm = 1,   // 上行：设备 -> 后端
-    kOutputPcm = 2,  // 下行：后端 -> 设备（PCM16，2 字节对齐）
+    kInputPcm = 1,    // 上行：设备 -> 后端
+    kOutputPcm = 2,   // 下行：后端 -> 设备（PCM16，2 字节对齐）
+    kOutputOpus = 3,  // 下行：后端 -> 设备（Opus，60ms/24kHz/单声道）
 };
 
 // flags 位定义（bit0=first, bit1=last）。

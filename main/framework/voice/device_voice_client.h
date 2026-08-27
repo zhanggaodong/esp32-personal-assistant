@@ -2,17 +2,21 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include <freertos/task.h>
 
 #include "voice/voice_protocol.h"
 
 class WebSocket;
+class OpusDecoderWrapper;
 
 // 设备语音 WebSocket 客户端（协议 v1，对应计划 Task 5 与第 4 节）。
 //
@@ -20,12 +24,17 @@ class WebSocket;
 //   - 复用 AiClient 的账号登录与 JWT；
 //   - 建立/复用后端 /api/voice/device 的 WebSocket 会话并完成 hello 握手；
 //   - 发送控制消息（turn.start/stop/cancel）与上行 PCM 二进制帧；
-//   - 解析并分发服务端事件与下行 output_pcm；
+//   - 解析并分发服务端事件与下行 output_pcm / output_opus；
 //   - 会话跨多轮复用、120s 空闲关闭、401/握手失败时清 token 并单次重登。
 //
 // 职责边界：本类是"传输 + 协议客户端"，不做完整轮次状态机与音频播放
 // （由 HeadlessVoiceController / PlaybackTask 在 Task 6-8 负责）。
 // 回调在 WebSocket 数据任务线程触发，调用方不得在其中长时间阻塞。
+//
+// opus 下行（type=3，60ms/24kHz/单声道）：WS 收帧线程只把原始帧入队，
+// 由本类持有的专用解码任务（26KB 大栈，libopus 解码需要）解码后回调
+// on_pcm。设备在 turn.start 里声明 audioCodec=opus，旧后端会忽略该字段
+// 并继续下发 PCM 帧（type=2），两种格式本类都能处理。
 class DeviceVoiceClient {
 public:
     using OnPcmFn = std::function<void(uint32_t turn_id, uint32_t sequence,
@@ -84,6 +93,16 @@ private:
     void FireDisconnected(const char* reason);
     static int64_t NowMs();
 
+    // ---- opus 下行解码（专用大栈任务；WS 线程只入队） ----
+    struct PendingOpusFrame {
+        std::vector<uint8_t> data;
+        uint32_t turn_id = 0;
+    };
+    static constexpr size_t kMaxQueuedOpusFrames = 96;  // ≈5.8 秒音频
+    static void OpusDecodeTaskTrampoline(void* arg);
+    void OpusDecodeLoop();
+    void EnqueueOpusFrame(uint32_t turn_id, const uint8_t* data, size_t len);
+
     std::unique_ptr<WebSocket> ws_;
     mutable std::mutex mutex_;  // 保护 ws_ 与回调字段
     EventGroupHandle_t hello_evt_ = nullptr;
@@ -95,4 +114,10 @@ private:
     OnPcmFn on_pcm_;
     OnEventFn on_event_;
     OnDisconnectedFn on_disconnected_;
+
+    std::mutex dec_mutex_;  // 保护 dec_queue_
+    std::deque<PendingOpusFrame> dec_queue_;
+    TaskHandle_t dec_task_ = nullptr;    // 惰性创建，常驻
+    uint32_t decoded_turn_ = 0;          // 仅解码任务访问
+    std::unique_ptr<OpusDecoderWrapper> tts_decoder_;  // 仅解码任务访问
 };
