@@ -39,8 +39,17 @@ int64_t DeviceVoiceClient::NowMs() {
 }
 
 void DeviceVoiceClient::UpdateConfig() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    ws_.reset();  // 配置变更后旧连接一律作废
+    std::unique_ptr<WebSocket> old;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        old = std::move(ws_);  // 锁内只移交所有权
+        // 作废旧代次：旧连接迟到的任何回调都会被代次检查丢弃。
+        connection_generation_.fetch_add(1);
+        active_connection_generation_ = 0;
+        disconnected_notified_ = false;
+        socket_cleanup_pending_ = false;
+    }
+    old.reset();  // 锁外析构
     active_turn_.store(0);
     {
         std::lock_guard<std::mutex> dec_lock(dec_mutex_);
@@ -68,25 +77,58 @@ void DeviceVoiceClient::SetDisconnectedCallback(OnDisconnectedFn cb) {
     on_disconnected_ = std::move(cb);
 }
 
-// 统一断线/失败出口：释放连接句柄（不在回调内再 Close，避免递归），
-// 且同一会话只向控制器通知一次。
-void DeviceVoiceClient::FireDisconnected(const char* reason) {
-    std::unique_ptr<WebSocket> old;
+// 统一断线/失败出口：只"标记 + 一次性通知控制器"，绝不析构连接对象。
+// 本方法可能运行在 WebSocket 接收任务上下文（OnDisconnected / bad_frame），
+// 在该任务里等待其自身退出会触发 EspSsl "Failed to wait for receive task
+// exit" 断言；析构统一延后到控制器任务调用 ReapDisconnectedSocket()。
+void DeviceVoiceClient::HandleSocketDisconnected(uint32_t generation,
+                                                 const char* reason) {
+    OnDisconnectedFn cb;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        old = std::move(ws_);
-        ws_.reset();
-        if (disconnected_notified_) {
-            return;  // 该会话已经通知过
+        // 代次为 0 说明还没有任何建连，属于误触发；旧代次迟到的回调同样忽略。
+        if (generation == 0 || generation != active_connection_generation_ ||
+            disconnected_notified_) {
+            return;
         }
         disconnected_notified_ = true;
-        OnDisconnectedFn cb = on_disconnected_;
-        // 把回调拷贝出来，解锁后调用，避免在锁内回调造成死锁。
-        if (cb) {
-            cb(reason);
-        }
+        socket_cleanup_pending_ = true;
+        active_turn_.store(0);
+        cb = on_disconnected_;
     }
-    old.reset();
+    ESP_LOGW(TAG, "socket disconnected generation=%u reason=%s",
+             (unsigned)generation, reason);
+    DeviceLog::Log('W', "VoiceClient", "ws 已断开: generation=%u reason=%s",
+                   (unsigned)generation, reason);
+
+    if (cb) {
+        cb(reason);  // 锁外回调，避免死锁
+    }
+}
+
+void DeviceVoiceClient::ReapDisconnectedSocket() {
+    std::unique_ptr<WebSocket> old;
+    uint32_t generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!socket_cleanup_pending_) {
+            return;  // 幂等：没有待回收的断线残留
+        }
+        old = std::move(ws_);
+        socket_cleanup_pending_ = false;
+        generation = active_connection_generation_;
+    }
+
+    const int64_t reap_start_ms = NowMs();
+    old.reset();  // 析构发生在控制器任务，可安全等待接收任务退出
+
+    // 固件启用 CONFIG_NEWLIB_NANO_FORMAT：printf 不支持 64 位格式符，
+    // 耗时一律以 unsigned 打印（毫秒级耗时远在范围内）。
+    ESP_LOGI(TAG, "socket cleanup complete generation=%u took=%ums",
+             (unsigned)generation,
+             (unsigned)(NowMs() - reap_start_ms));
+    DeviceLog::Log('I', "VoiceClient", "ws 延迟回收完成: generation=%u",
+                   (unsigned)generation);
 }
 
 bool DeviceVoiceClient::DoConnect() {
@@ -113,10 +155,17 @@ bool DeviceVoiceClient::DoConnect() {
         return false;
     }
 
+    // 新连接获得新代次：旧连接的迟到回调经代次检查直接丢弃。
+    const uint32_t generation = connection_generation_.fetch_add(1) + 1;
+
     ws->SetHeader("Authorization", ("Bearer " + token).c_str());
     ws->SetHeader("Device-Protocol-Version",
                   std::to_string(voice::kProtocolVersion).c_str());
-    ws->OnData([this](const char* data, size_t len, bool binary) {
+    ws->OnData([this, generation](const char* data, size_t len, bool binary) {
+        if (generation != connection_generation_.load()) {
+            return;  // 旧连接迟到的回调：忽略
+        }
+        last_activity_ms_.store(NowMs());
         if (binary) {
             HandleBinary(data, len);
         } else {
@@ -124,14 +173,16 @@ bool DeviceVoiceClient::DoConnect() {
         }
         last_activity_ms_.store(NowMs());
     });
-    ws->OnDisconnected([this]() {
+    ws->OnDisconnected([this, generation]() {
         xEventGroupSetBits(hello_evt_, kHelloFailBit);
-        FireDisconnected("server_closed");
+        HandleSocketDisconnected(generation, "server_closed");
     });
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        active_connection_generation_ = generation;
         disconnected_notified_ = false;
+        socket_cleanup_pending_ = false;
         ws_ = std::move(ws);
     }
 
@@ -142,8 +193,14 @@ bool DeviceVoiceClient::DoConnect() {
         ESP_LOGE(TAG, "websocket connect failed, code=%d",
                  ws_ ? ws_->GetLastError() : -1);
         DeviceLog::Log('E', "VoiceClient", "ws 连接失败(TCP/TLS 层)");
-        std::lock_guard<std::mutex> lock(mutex_);
-        ws_.reset();
+        // 建连失败发生在调用方任务（绝不是该 socket 的接收任务），可就地回收；
+        // 规则不变：锁内移交，锁外析构。
+        std::unique_ptr<WebSocket> failed;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            failed = std::move(ws_);
+        }
+        failed.reset();
         return false;
     }
 
@@ -159,22 +216,27 @@ bool DeviceVoiceClient::DoConnect() {
     ESP_LOGE(TAG, "websocket handshake timeout/failed, bits=%u", (unsigned)bits);
     DeviceLog::Log('E', "VoiceClient",
                    bits & kHelloFailBit ? "ws 握手被服务器拒绝" : "ws 握手超时(多为反代未放行 WebSocket)");
-    FireDisconnected("handshake_failed");
+    HandleSocketDisconnected(generation, "handshake_failed");
+    ReapDisconnectedSocket();
     return false;
 }
 
 bool DeviceVoiceClient::EnsureConnected() {
     // 已连接但空闲过久：服务端多半已关，主动重建。
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (ws_ && ws_->IsConnected()) {
-            if (NowMs() - last_activity_ms_.load() > kIdleCloseMs) {
-                ESP_LOGI(TAG, "voice socket idle, rebuild");
-                ws_.reset();  // 释放旧连接，走下方重连
-            } else {
-                return true;
+        std::unique_ptr<WebSocket> stale;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (ws_ && ws_->IsConnected()) {
+                if (NowMs() - last_activity_ms_.load() > kIdleCloseMs) {
+                    ESP_LOGI(TAG, "voice socket idle, rebuild");
+                    stale = std::move(ws_);  // 锁内移交，锁外析构
+                } else {
+                    return true;
+                }
             }
         }
+        stale.reset();  // 调用方任务析构，可安全等待接收任务退出
     }
 
     // 至多重试一次；首次失败后清掉 token，第二次以新 token 真正重登重连。
@@ -185,14 +247,20 @@ bool DeviceVoiceClient::EnsureConnected() {
         if (DoConnect()) {
             return true;
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        ws_.reset();
+        std::unique_ptr<WebSocket> leftover;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            leftover = std::move(ws_);
+        }
+        leftover.reset();
         if (attempt == 0) {
             AiClient::Instance().InvalidateToken();
             ESP_LOGW(TAG, "voice connect failed, re-login and retry once");
         }
     }
-    FireDisconnected("connect_failed");
+    // 全部失败：按当前代次标记断线并就地回收（调用方是控制器任务）。
+    HandleSocketDisconnected(connection_generation_.load(), "connect_failed");
+    ReapDisconnectedSocket();
     return false;
 }
 
@@ -266,9 +334,15 @@ bool DeviceVoiceClient::SendInputPcm(uint32_t turn_id, uint32_t sequence,
 }
 
 void DeviceVoiceClient::Disconnect() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    active_turn_.store(0);
-    ws_.reset();
+    std::unique_ptr<WebSocket> old;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        active_turn_.store(0);
+        old = std::move(ws_);  // 锁内移交，锁外析构
+        disconnected_notified_ = false;
+        socket_cleanup_pending_ = false;
+    }
+    old.reset();
 }
 
 void DeviceVoiceClient::HandleBinary(const char* data, size_t len) {
@@ -278,7 +352,8 @@ void DeviceVoiceClient::HandleBinary(const char* data, size_t len) {
                                  frame);
     if (rc != voice::FrameParseResult::kOk) {
         ESP_LOGW(TAG, "bad binary frame rc=%d, closing", static_cast<int>(rc));
-        FireDisconnected("bad_frame");
+        // 接收任务上下文：只标记断线，对象延后由控制器任务回收。
+        HandleSocketDisconnected(connection_generation_.load(), "bad_frame");
         return;
     }
     if (frame.type == voice::FrameType::kOutputOpus) {

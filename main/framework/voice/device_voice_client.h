@@ -78,6 +78,11 @@ public:
     void SetEventCallback(OnEventFn cb);
     void SetDisconnectedCallback(OnDisconnectedFn cb);
 
+    // 由控制器任务在收到 kDisconnected 后调用：延迟回收已断开的 WebSocket。
+    // 绝不在网络接收回调任务内析构连接对象（那会让接收任务等待自己退出，
+    // 触发 EspSsl/EventGroup assert）。可安全重复调用（幂等）。
+    void ReapDisconnectedSocket();
+
     // 当前活动轮 turn id（0 = 无活动轮）。
     uint32_t ActiveTurnId() const { return active_turn_.load(); }
 
@@ -90,7 +95,8 @@ private:
     bool DoConnect();  // 建连 + 等 hello（不含重登重试）
     void HandleText(const char* data, size_t len);
     void HandleBinary(const char* data, size_t len);
-    void FireDisconnected(const char* reason);
+    // 断线通知：只做"标记 + 一次性回调"，不析构任何对象（可从接收任务调用）。
+    void HandleSocketDisconnected(uint32_t generation, const char* reason);
     static int64_t NowMs();
 
     // ---- opus 下行解码（专用大栈任务；WS 线程只入队） ----
@@ -107,9 +113,14 @@ private:
     mutable std::mutex mutex_;  // 保护 ws_ 与回调字段
     EventGroupHandle_t hello_evt_ = nullptr;
 
+    // 连接代次：DoConnect 每次建连自增。回调整获代次后忽略旧连接迟到事件。
+    std::atomic<uint32_t> connection_generation_{0};
+    uint32_t active_connection_generation_ = 0;  // mutex_ 保护：当前建连代次
+
     std::atomic<uint32_t> active_turn_{0};
     std::atomic<int64_t> last_activity_ms_{0};  // 供 120s 空闲关闭判断
-    bool disconnected_notified_ = false;        // 同一会话断线只通知一次
+    bool disconnected_notified_ = false;        // mutex_ 保护：同一代次只通知一次
+    bool socket_cleanup_pending_ = false;       // mutex_ 保护：待 ReapDisconnectedSocket 回收
 
     OnPcmFn on_pcm_;
     OnEventFn on_event_;

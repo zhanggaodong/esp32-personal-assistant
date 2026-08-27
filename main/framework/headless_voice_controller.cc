@@ -293,6 +293,10 @@ void HeadlessVoiceController::HandleEvent(Event e) {
                 state_ = State::kWaitWifi;
                 ESP_LOGW(TAG, "stream state ready -> wait_wifi");
                 DeviceLog::Log('W', "HeadlessVoice", "stream: WiFi 不可用，暂停 PTT");
+            } else if (e == Event::kDisconnected) {
+                // 空闲被服务端关闭：只回收旧 socket，保持 Ready，
+                // 下一次 PTT 在 EnsureConnected 中自动重连。
+                DeviceVoiceClient::Instance().ReapDisconnectedSocket();
             }
             break;
         case State::kWaitingAsr:
@@ -307,6 +311,7 @@ void HeadlessVoiceController::HandleEvent(Event e) {
             } else if (e == Event::kTurnError) {
                 HandleTurnEnd(false);
             } else if (e == Event::kDisconnected) {
+                DeviceVoiceClient::Instance().ReapDisconnectedSocket();
                 CancelActiveTurn();
                 HandleTurnEnd(false);
             } else if (e == Event::kNetworkUnavailable) {
@@ -326,6 +331,9 @@ void HeadlessVoiceController::HandleEvent(Event e) {
             } else if (e == Event::kPress) {
                 ESP_LOGW(TAG, "stream PTT ignored: waiting for WiFi");
                 DeviceLog::Log('W', "HeadlessVoice", "stream: PTT 被忽略，正在等待 WiFi");
+            } else if (e == Event::kDisconnected) {
+                // 只回收断线残留；网络不可用的提示音由 WiFi 断开路径负责，不重复播放。
+                DeviceVoiceClient::Instance().ReapDisconnectedSocket();
             }
             break;
         case State::kRecording:
