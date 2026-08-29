@@ -133,6 +133,8 @@ private:
     // 已收到 turn.done、正在等待解码排空的轮（0 = 无）。该轮的队列残余
     // 仍会被解码并播放到排空；新一轮 StartTurn / 取消 / 断线都会清掉它。
     std::atomic<uint32_t> finished_turn_{0};
+    // 本轮已入队的下行 opus 帧数（与后端 ttsFramesSent 对账，定位丢帧段）。
+    std::atomic<uint32_t> turn_opus_frames_{0};
     std::atomic<int64_t> last_activity_ms_{0};  // 供 120s 空闲关闭判断
     bool disconnected_notified_ = false;        // mutex_ 保护：同一代次只通知一次
     bool socket_cleanup_pending_ = false;       // mutex_ 保护：待 ReapDisconnectedSocket 回收

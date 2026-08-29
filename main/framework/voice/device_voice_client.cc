@@ -290,6 +290,7 @@ bool DeviceVoiceClient::StartTurn(uint32_t turn_id,
     // 新一轮开始：上一轮若还在等排空（finished_turn_ 未清），立即作废——
     // 插话打断的语义是丢弃旧轮残余，而不是继续播完。
     finished_turn_.store(0);
+    turn_opus_frames_.store(0);
     return true;
 }
 
@@ -428,6 +429,7 @@ void DeviceVoiceClient::EnqueueOpusFrame(uint32_t turn_id,
             }
         }
         if (queued) {
+            turn_opus_frames_.fetch_add(1);
             break;
         }
         if (!IsTurnOutputAlive(turn_id) || !IsConnected()) {
@@ -509,6 +511,9 @@ void DeviceVoiceClient::FireOutputDrained() {
         return;  // 幂等：没有待排空的轮
     }
     ESP_LOGD(TAG, "output drained: turn=%u", (unsigned)turn_id);
+    // 对账日志：frames 与后端 ttsFramesSent 比对，判断丢帧在传输段还是播放段。
+    DeviceLog::Log('I', "VoiceClient", "ws 音频排空: turn=%u frames=%u",
+                   (unsigned)turn_id, (unsigned)turn_opus_frames_.load());
     OnOutputDrainedFn cb;
     {
         std::lock_guard<std::mutex> lock(mutex_);

@@ -282,6 +282,8 @@ void HeadlessVoiceController::WorkerLoop() {
         if (xQueueReceive(event_queue_, &e, wait) != pdTRUE) {
             if (in_wait_state && NowMs() >= (int64_t)turn_deadline_ms_) {
                 ESP_LOGE(TAG, "turn timeout waiting turn.done, forcing end");
+                DeviceLog::Log('E', "HeadlessVoice",
+                               "stream: 等待 turn.done 超时(120s)，强制结束本轮");
                 CancelActiveTurn();
                 HandleTurnEnd(false);
             }
@@ -751,6 +753,10 @@ void HeadlessVoiceController::PlaybackLoop() {
     bool end_posted = false;
     int64_t last_starve_log_ms = 0;
     uint32_t last_generation = playback_.generation();
+    // 本轮播放对账统计（generation 变化即新一轮归零）：播放时长与后端
+    // ttsFramesSent×60ms 比对，可定位"文字完整却只读一半"丢在哪一段。
+    size_t played_samples = 0;
+    uint32_t starve_count = 0;
     for (;;) {
         xTaskNotifyWait(0, 0xFFFFFFFFUL, nullptr, pdMS_TO_TICKS(40));  // 轮询兜底
 
@@ -760,6 +766,8 @@ void HeadlessVoiceController::PlaybackLoop() {
         const uint32_t generation = playback_.generation();
         if (generation != last_generation) {
             last_generation = generation;
+            played_samples = 0;
+            starve_count = 0;
             if (output_on && codec != nullptr) {
                 codec->EnableOutput(false);
                 output_on = false;
@@ -773,6 +781,7 @@ void HeadlessVoiceController::PlaybackLoop() {
         chunk.clear();
         size_t n = playback_.PopChunk(chunk, kPlaybackChunkSamples);
         if (n > 0) {
+            played_samples += n;
             if (!output_on && codec != nullptr) {
                 codec->EnableOutput(true);
                 output_on = true;
@@ -791,6 +800,11 @@ void HeadlessVoiceController::PlaybackLoop() {
             }
             if (!end_posted) {
                 end_posted = true;
+                DeviceLog::Log('I', "HeadlessVoice",
+                               "stream: 本轮播完 samples=%u(约%ums) 断档=%u次",
+                               (unsigned)played_samples,
+                               (unsigned)(played_samples / 24),
+                               (unsigned)starve_count);
                 if (event_queue_ != nullptr) {
                     Event e = Event::kPlaybackEnd;
                     xQueueSend(event_queue_, &e, 0);
@@ -802,6 +816,7 @@ void HeadlessVoiceController::PlaybackLoop() {
             const int64_t now = NowMs();
             if (now - last_starve_log_ms >= 1000) {
                 last_starve_log_ms = now;
+                starve_count += 1;
                 ESP_LOGW(TAG, "playback underrun: buffered=%u samples",
                          (unsigned)playback_.BufferedSamples());
                 DeviceLog::Log('W', "HeadlessVoice", "stream: 播放缓冲断档(等待音频)");
