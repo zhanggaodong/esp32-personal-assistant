@@ -15,7 +15,7 @@
 #include "system_info.h"
 
 #ifdef CONFIG_BOARD_TYPE_JIUCHUAN
-#include "config.h"
+#include "boards/jiuchuan-s3/config.h"
 #endif
 
 #if defined(CONFIG_APP_MODE_FRAMEWORK) || defined(CONFIG_APP_MODE_HEADLESS_VOICE)
