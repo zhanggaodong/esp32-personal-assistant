@@ -360,6 +360,11 @@ private:
             ESP_LOGI(BOARD_TAG, "PTT released");
             HeadlessVoiceController::Instance().OnPttReleased();
         });
+        HeadlessVoiceController::Instance().SetShutdownCallback([this]() {
+            if (power_manager_ != nullptr) {
+                power_manager_->SetPowerState(PowerState::SHUTDOWN);
+            }
+        });
 
         // 重新配网：停止当前连接并进入热点配网
         boot_button_.OnClick([this]() {

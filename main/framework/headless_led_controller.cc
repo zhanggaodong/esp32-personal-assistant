@@ -97,6 +97,11 @@ void HeadlessLedController::ShowError() {
             kReadyRed, kReadyGreen, kReadyBlue});
 }
 
+void HeadlessLedController::ShowPowerOff() {
+    SetCfg({Mode::kBlink, kErrorRed, kErrorGreen, kErrorBlue, 150, 3, 0,
+            0, 0, 0});
+}
+
 void HeadlessLedController::ShowProvisioned() {
     // 绿色 3 次短闪后恢复常亮绿
     SetCfg({Mode::kBlink, kReadyRed, kReadyGreen, kReadyBlue, 250, 3, 0,

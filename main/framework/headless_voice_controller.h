@@ -5,6 +5,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <functional>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -34,6 +35,9 @@ public:
     // 电源键按下/松开（iot_button 回调线程调用，非阻塞）
     void OnPttPressed();
     void OnPttReleased();
+
+    // 由板级注入实际断电/深睡动作；只在语音工作线程中调用。
+    void SetShutdownCallback(std::function<void()> callback);
 
     // 网络回调线程调用。stream_v1 通过事件队列把状态迁移交给语音工作线程，
     // 避免 Wi-Fi 已连但状态机仍停在 kWaitWifi，导致 PTT 被静默忽略。
@@ -86,6 +90,7 @@ private:
     void HandleEvent(Event e); // 集中处理状态迁移
     void HandleTurnEnd(bool success);  // 一轮结束：成功(播完排空)或失败(报错)统一收尾
     void ReturnToIdleState();  // 按实时网络状态回到 ready/wait_wifi，并同步 LED
+    void RequestShutdown();    // 取消当前轮次、显示关机灯效并调用板级电源动作
 
     // —— legacy 路径（保留）——
     void HandlePressLegacy();
@@ -106,6 +111,12 @@ private:
     std::atomic_bool speaking_{false};     // 正在播报 TTS（供提示音避让）
     std::atomic_bool conversation_active_{false};  // 一轮对话（录音→播报）进行中（legacy 与 stream 共用）
     std::atomic_bool network_connected_{false};  // 网络回调即时更新，供收尾选择空闲状态
+    std::atomic<uint64_t> ptt_press_started_ms_{0};
+    std::atomic_bool last_release_was_short_{false};
+    std::atomic_bool shutdown_requested_{false};
+    std::atomic<uint8_t> short_click_count_{0};
+    std::atomic<uint64_t> short_click_window_started_ms_{0};
+    std::function<void()> shutdown_callback_;
     TaskHandle_t worker_ = nullptr;
     TaskHandle_t playback_task_ = nullptr;
     QueueHandle_t event_queue_ = nullptr;  // stream_v1 事件队列（Event 类型）

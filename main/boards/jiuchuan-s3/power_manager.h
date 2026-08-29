@@ -167,12 +167,20 @@ public:
                     
                 //取消 PWR_EN 使能
                     /* 防止关机后误唤醒 */
+#ifdef CONFIG_APP_MODE_HEADLESS_VOICE
+                    ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(PWR_BUTTON_GPIO, 1));
+#else
                     ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(PWR_BUTTON_GPIO, 0));
+#endif
                     ESP_ERROR_CHECK(rtc_gpio_pulldown_en(PWR_BUTTON_GPIO)); // 内部下拉
                     ESP_ERROR_CHECK(rtc_gpio_pullup_dis(PWR_BUTTON_GPIO));
                     /* 关闭电源使能 */
                     rtc_gpio_set_level(PWR_EN_GPIO, 0);
+#ifdef CONFIG_APP_MODE_HEADLESS_VOICE
+                    rtc_gpio_hold_en(PWR_EN_GPIO);
+#else
                     rtc_gpio_hold_dis(PWR_EN_GPIO);
+#endif
                     
                     // 确保所有外设已关闭
                     vTaskDelay(200 / portTICK_PERIOD_MS);

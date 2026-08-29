@@ -23,6 +23,8 @@
 #define TAG "HeadlessVoice"
 
 namespace {
+constexpr uint64_t kPttClickHoldMs = 250;
+constexpr uint64_t kPttClickWindowMs = 1200;
 
 // 录音时长边界（legacy）：最短 200ms，最长 8s（达到上限自动按"松开"路径提交）
 constexpr size_t kMinRecordMs = 200;
@@ -190,6 +192,10 @@ void HeadlessVoiceController::OnPttPressed() {
     if (!booted_.load()) {
         return;  // 启动阶段忽略
     }
+    // 新一轮尚未发生松手，不能沿用上一轮的短击结果。否则按住直到录音
+    // 上限自动截止时，会被上一轮残留的 true 误判为 short_click。
+    last_release_was_short_.store(false);
+    ptt_press_started_ms_.store((uint64_t)(esp_timer_get_time() / 1000));
     if (UseStream()) {
         ptt_held_.store(true);
         Event e = Event::kPress;
@@ -221,6 +227,27 @@ void HeadlessVoiceController::OnPttPressed() {
 }
 
 void HeadlessVoiceController::OnPttReleased() {
+    const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    const uint64_t started_ms = ptt_press_started_ms_.load();
+    const bool short_press = started_ms != 0 && now_ms >= started_ms &&
+                             now_ms - started_ms < kPttClickHoldMs;
+    last_release_was_short_.store(short_press);
+    if (short_press) {
+        if (short_click_window_started_ms_ == 0 ||
+            now_ms - short_click_window_started_ms_ > kPttClickWindowMs) {
+            short_click_window_started_ms_ = now_ms;
+            short_click_count_ = 0;
+        }
+        short_click_count_++;
+        if (short_click_count_ >= 3) {
+            shutdown_requested_.store(true);
+            short_click_count_ = 0;
+            short_click_window_started_ms_ = 0;
+        }
+    } else {
+        short_click_count_ = 0;
+        short_click_window_started_ms_ = 0;
+    }
     ptt_held_.store(false);  // 录音循环据此停止采集；流式路径由状态机感知
     if (UseStream() && event_queue_ != nullptr) {
         Event e = Event::kRelease;
@@ -232,6 +259,10 @@ void HeadlessVoiceController::OnPttReleased() {
             DeviceLog::Log('I', "HeadlessVoice", "stream: PTT 松开事件已入队");
         }
     }
+}
+
+void HeadlessVoiceController::SetShutdownCallback(std::function<void()> callback) {
+    shutdown_callback_ = std::move(callback);
 }
 
 void HeadlessVoiceController::OnNetworkConnectivityChanged(bool connected) {
@@ -268,6 +299,9 @@ void HeadlessVoiceController::WorkerLoop() {
                 continue;
             }
             HandlePressLegacy();
+            if (shutdown_requested_.exchange(false)) {
+                RequestShutdown();
+            }
             continue;
         }
         if (event_queue_ == nullptr) {
@@ -290,6 +324,9 @@ void HeadlessVoiceController::WorkerLoop() {
             continue;
         }
         HandleEvent(e);
+        if (shutdown_requested_.exchange(false)) {
+            RequestShutdown();
+        }
     }
 }
 
@@ -542,10 +579,19 @@ capture_done:
         timeline_.Log(TAG);
         return;
     }
+    if (last_release_was_short_.load()) {
+        vc.CancelTurn(current_turn_id_, "short_click");
+        current_turn_id_ = 0;
+        conversation_active_.store(false);
+        ReturnToIdleState();
+        return;
+    }
     if (elapsed_ms < kMinRecordMs) {
         ESP_LOGW(TAG, "recording too short: %u ms", (unsigned)elapsed_ms);
         vc.CancelTurn(current_turn_id_, "too_short");
-        prompt.Play(AudioPromptPlayer::Prompt::kNoSpeech);
+        if (!last_release_was_short_.load()) {
+            prompt.Play(AudioPromptPlayer::Prompt::kNoSpeech);
+        }
         led.ShowError();
         current_turn_id_ = 0;
         conversation_active_.store(false);
@@ -601,6 +647,18 @@ void HeadlessVoiceController::CancelActiveTurn() {
     }
     playback_.Clear();
     speaking_.store(false);
+}
+
+void HeadlessVoiceController::RequestShutdown() {
+    ESP_LOGI(TAG, "PTT triple short-click shutdown requested");
+    CancelActiveTurn();
+    HeadlessLedController::Instance().ShowPowerOff();
+    vTaskDelay(pdMS_TO_TICKS(950));
+    if (shutdown_callback_) {
+        shutdown_callback_();
+    } else {
+        ESP_LOGE(TAG, "shutdown callback is not configured");
+    }
 }
 
 void HeadlessVoiceController::HandleTurnEnd(bool success) {
@@ -887,6 +945,12 @@ void HeadlessVoiceController::HandlePressLegacy() {
     if (mic_error || mic24k.empty()) {
         ESP_LOGE(TAG, "mic error or no data");
         led.ShowError();
+        conversation_active_.store(false);
+        state_ = State::kReady;
+        led.ShowReady();
+        return;
+    }
+    if (last_release_was_short_.load()) {
         conversation_active_.store(false);
         state_ = State::kReady;
         led.ShowReady();

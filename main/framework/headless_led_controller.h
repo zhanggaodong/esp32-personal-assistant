@@ -24,6 +24,7 @@ public:
     void ShowRecording();      // 录音中（按住说话）：橙色低幅呼吸
     void ShowProcessing();     // 处理中/播报中：蓝色呼吸
     void ShowError();          // 不允许录音：红色 2 次短闪后恢复待机绿
+    void ShowPowerOff();       // 关机：红色 3 次短闪后熄灭
     void ShowProvisioned();    // 配网成功：绿色 3 次短闪后常亮
     void Off();
 
