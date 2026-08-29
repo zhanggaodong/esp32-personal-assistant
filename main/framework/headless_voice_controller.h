@@ -77,6 +77,7 @@ private:
     void OnEvent(const voice::ServerMessage& msg);  // DeviceVoiceClient 事件回调
     void OnPcm(uint32_t turn_id, uint32_t sequence, bool first, bool last,
                const int16_t* pcm, size_t count);  // DeviceVoiceClient PCM 回调
+    void OnOutputDrained(uint32_t turn_id);  // 该轮下行音频已全部解码入队（排空）
     void OnDisconnected(const char* reason);
 
     void HandlePressStream();  // kReady/(播报中)按下：开新一轮或插话

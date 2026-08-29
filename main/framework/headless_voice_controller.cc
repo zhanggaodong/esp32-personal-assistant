@@ -146,6 +146,8 @@ void HeadlessVoiceController::Start() {
         });
         vc.SetEventCallback([this](const voice::ServerMessage& msg) { OnEvent(msg); });
         vc.SetDisconnectedCallback([this](const char* reason) { OnDisconnected(reason); });
+        vc.SetOutputDrainedCallback(
+            [this](uint32_t turn_id) { OnOutputDrained(turn_id); });
 
         event_queue_ = xQueueCreate(16, sizeof(Event));
         if (event_queue_ == nullptr) {
@@ -311,7 +313,8 @@ void HeadlessVoiceController::HandleEvent(Event e) {
                 // 插话：取消旧轮并立即开始新一轮（由 BeginRecording 内部处理）
                 HandlePressStream();
             } else if (e == Event::kTurnDone) {
-                // conversationId 与 EOS 已在 OnEvent 中设置/标记，等待播放排空
+                // conversationId 已在 OnEvent 中设置；EOS 等解码排空回调
+                // （OnOutputDrained）标记，之后播放队列排空才 kPlaybackEnd
                 turn_deadline_ms_ = NowMs() + kTurnDeadlineMs;
             } else if (e == Event::kTurnError) {
                 HandleTurnEnd(false);
@@ -628,12 +631,13 @@ void HeadlessVoiceController::ReturnToIdleState() {
 void HeadlessVoiceController::OnPcm(uint32_t turn_id, uint32_t /*sequence*/,
                                     bool /*first*/, bool /*last*/,
                                     const int16_t* pcm, size_t count) {
-    // 队列满时阻塞等待而非丢弃：解码任务（或 WS 接收线程）在此形成背压，
-    // 逐级传导回服务器，杜绝长回答音频被队列上限截断。
-    // 每次入队前先复查轮次：等待期间被插话/取消的旧轮，剩余帧直接丢弃。
+    // 队列满时阻塞等待而非丢弃：与解码队列的阻塞入队共同构成完整背压链
+    // （播放队列满 → 解码停 → 解码队列满 → WS 接收停读 → TCP 流控 →
+    // 服务器节流），长回答音频零丢失。
+    // 每次入队前先复查轮次：活动轮或待排空轮才接受；等待期间被插话/
+    // 取消的旧轮，剩余帧直接丢弃。
     for (;;) {
-        if (turn_id != 0 &&
-            DeviceVoiceClient::Instance().ActiveTurnId() != turn_id) {
+        if (!DeviceVoiceClient::Instance().IsTurnOutputAlive(turn_id)) {
             return;
         }
         if (playback_.Push(pcm, count) !=
@@ -644,6 +648,15 @@ void HeadlessVoiceController::OnPcm(uint32_t turn_id, uint32_t /*sequence*/,
     }
     if (playback_task_ != nullptr) {
         xTaskNotifyGive(playback_task_);
+    }
+}
+
+// 解码任务确认某轮下行音频已全部解码入播放队列（排空语义终点）。
+// 仅当该轮仍是当前轮时才标记 EOS：看门狗强制结束/插话后的陈旧回调
+// 不得污染新一轮的播放队列（新一轮在 BeginRecording 里 Clear 复位）。
+void HeadlessVoiceController::OnOutputDrained(uint32_t turn_id) {
+    if (turn_id != 0 && turn_id == current_turn_id_) {
+        playback_.MarkEndOfStream();
     }
 }
 
@@ -678,7 +691,10 @@ void HeadlessVoiceController::OnEvent(const voice::ServerMessage& msg) {
                 std::lock_guard<std::mutex> lk(conv_mutex_);
                 conversation_id_ = msg.conversation_id;  // 下一轮复用
             }
-            playback_.MarkEndOfStream();  // 不再来新音频；播完排空即结束
+            // EOS 不在这里标记：此刻解码队列里往往还压着数秒未解码的尾部
+            // 音频（后端合成远快于实时播放），提前 EOS 会让播放队列
+            // "播完即结束"，长回答尾部被整批截断。由解码任务排空后经
+            // OnOutputDrained 标记（DeviceVoiceClient 排空语义）。
             if (event_queue_ != nullptr) {
                 Event e = Event::kTurnDone;
                 xQueueSend(event_queue_, &e, 0);
@@ -734,8 +750,23 @@ void HeadlessVoiceController::PlaybackLoop() {
     bool output_on = false;
     bool end_posted = false;
     int64_t last_starve_log_ms = 0;
+    uint32_t last_generation = playback_.generation();
     for (;;) {
         xTaskNotifyWait(0, 0xFFFFFFFFUL, nullptr, pdMS_TO_TICKS(40));  // 轮询兜底
+
+        // 队列被清空（插话取消/新一轮 BeginRecording 的 Clear）时必须复位
+        // 本任务的输出状态：CancelActiveTurn 会直接关掉codec输出，若本任务
+        // 的 output_on 仍为 true，下一轮回复会"以为输出还开着"而整段静音。
+        const uint32_t generation = playback_.generation();
+        if (generation != last_generation) {
+            last_generation = generation;
+            if (output_on && codec != nullptr) {
+                codec->EnableOutput(false);
+                output_on = false;
+            }
+            speaking_.store(false);
+            end_posted = false;
+        }
 
         // PopChunk 是追加语义（头文件约定 out 调用前 clear）：
         // 不清空会导致 chunk 无限增长、OutputData 反复重播旧数据并耗尽内存。

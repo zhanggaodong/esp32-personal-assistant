@@ -51,6 +51,7 @@ void DeviceVoiceClient::UpdateConfig() {
     }
     old.reset();  // 锁外析构
     active_turn_.store(0);
+    finished_turn_.store(0);
     {
         std::lock_guard<std::mutex> dec_lock(dec_mutex_);
         dec_queue_.clear();  // 丢弃未解码的旧格式帧
@@ -77,6 +78,11 @@ void DeviceVoiceClient::SetDisconnectedCallback(OnDisconnectedFn cb) {
     on_disconnected_ = std::move(cb);
 }
 
+void DeviceVoiceClient::SetOutputDrainedCallback(OnOutputDrainedFn cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    on_drained_ = std::move(cb);
+}
+
 // 统一断线/失败出口：只"标记 + 一次性通知控制器"，绝不析构连接对象。
 // 本方法可能运行在 WebSocket 接收任务上下文（OnDisconnected / bad_frame），
 // 在该任务里等待其自身退出会触发 EspSsl "Failed to wait for receive task
@@ -94,6 +100,7 @@ void DeviceVoiceClient::HandleSocketDisconnected(uint32_t generation,
         disconnected_notified_ = true;
         socket_cleanup_pending_ = true;
         active_turn_.store(0);
+        finished_turn_.store(0);  // 断线无排空可言，残余帧全部失效
         cb = on_disconnected_;
     }
     ESP_LOGW(TAG, "socket disconnected generation=%u reason=%s",
@@ -280,6 +287,9 @@ bool DeviceVoiceClient::StartTurn(uint32_t turn_id,
         return false;
     }
     active_turn_.store(turn_id);
+    // 新一轮开始：上一轮若还在等排空（finished_turn_ 未清），立即作废——
+    // 插话打断的语义是丢弃旧轮残余，而不是继续播完。
+    finished_turn_.store(0);
     return true;
 }
 
@@ -296,7 +306,8 @@ bool DeviceVoiceClient::StopTurn(uint32_t turn_id) {
 }
 
 bool DeviceVoiceClient::CancelTurn(uint32_t turn_id, const std::string& reason) {
-    active_turn_.store(0);  // 立即使旧轮迟到输出失效
+    active_turn_.store(0);    // 立即使旧轮迟到输出失效
+    finished_turn_.store(0);  // 取消语义：残余帧丢弃，不做排空
     const std::string msg = voice::BuildTurnCancel(turn_id, reason);
     if (msg.empty()) {
         return false;
@@ -338,11 +349,21 @@ void DeviceVoiceClient::Disconnect() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         active_turn_.store(0);
+        finished_turn_.store(0);
         old = std::move(ws_);  // 锁内移交，锁外析构
         disconnected_notified_ = false;
         socket_cleanup_pending_ = false;
     }
     old.reset();
+}
+
+bool DeviceVoiceClient::IsTurnOutputAlive(uint32_t turn_id) const {
+    if (turn_id == 0) {
+        return false;
+    }
+    // 活动轮正常接受；finished_turn_ 是已收 turn.done、等待解码排空的轮，
+    // 其残余音频必须继续放行（否则长回答尾部被整批丢弃）。
+    return turn_id == active_turn_.load() || turn_id == finished_turn_.load();
 }
 
 void DeviceVoiceClient::HandleBinary(const char* data, size_t len) {
@@ -359,7 +380,8 @@ void DeviceVoiceClient::HandleBinary(const char* data, size_t len) {
     if (frame.type == voice::FrameType::kOutputOpus) {
         // opus 帧：只入队，解码在专用大栈任务中做（libopus 吃栈，
         // WS 接收任务仅 4KB 栈，绝不能在这里直接解码）。
-        if (frame.turn_id == active_turn_.load()) {
+        // 活动轮与"待排空轮"（已收 turn.done）都接受。
+        if (IsTurnOutputAlive(frame.turn_id)) {
             EnqueueOpusFrame(frame.turn_id, frame.payload, frame.payload_size);
         }
         return;
@@ -388,16 +410,30 @@ void DeviceVoiceClient::EnqueueOpusFrame(uint32_t turn_id,
     if (len == 0) {
         return;
     }
-    {
-        std::lock_guard<std::mutex> lock(dec_mutex_);
-        if (dec_queue_.size() >= kMaxQueuedOpusFrames) {
-            // 解码跟不上时丢最旧：追上实时比保住历史更重要
-            dec_queue_.pop_front();
+    // 队列满：阻塞等待解码消费，绝不丢帧。旧实现"丢最旧"会在长回答时
+    // 挖掉紧邻播放位置的音频（中段吞字）。这里也是唯一能让流控反向节流
+    // 服务器的环节：WS 接收任务停读 → TCP 窗口收窄 → 服务器发送被节流。
+    // 等待由三个条件打破：解码出队腾位（常规，约一个帧时长内）、轮次失效
+    // （插话/取消/新轮）、连接断开。
+    for (;;) {
+        bool queued = false;
+        {
+            std::lock_guard<std::mutex> lock(dec_mutex_);
+            if (dec_queue_.size() < kMaxQueuedOpusFrames) {
+                PendingOpusFrame frame;
+                frame.data.assign(data, data + len);
+                frame.turn_id = turn_id;
+                dec_queue_.push_back(std::move(frame));
+                queued = true;
+            }
         }
-        PendingOpusFrame frame;
-        frame.data.assign(data, data + len);
-        frame.turn_id = turn_id;
-        dec_queue_.push_back(std::move(frame));
+        if (queued) {
+            break;
+        }
+        if (!IsTurnOutputAlive(turn_id) || !IsConnected()) {
+            return;  // 轮次已失效或连接已断：迟到帧无意义，直接丢弃
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
     if (dec_task_ == nullptr) {
         // 惰性创建、常驻。26KB 栈与小智的 opus 编解码任务一致（libopus 需要）。
@@ -420,13 +456,24 @@ void DeviceVoiceClient::OpusDecodeLoop() {
         ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(100));
         for (;;) {
             PendingOpusFrame frame;
+            bool has_frame = false;
             {
                 std::lock_guard<std::mutex> lock(dec_mutex_);
-                if (dec_queue_.empty()) {
-                    break;
+                if (!dec_queue_.empty()) {
+                    frame = std::move(dec_queue_.front());
+                    dec_queue_.pop_front();
+                    has_frame = true;
                 }
-                frame = std::move(dec_queue_.front());
-                dec_queue_.pop_front();
+            }
+            if (!has_frame) {
+                // 队列已空：若有一轮在等待排空（turn.done 已到且无新轮接管），
+                // 此刻即"该轮全部下行音频已解码入播放队列"的确切时点，
+                // 通知控制器标记 EOS。在此之前绝不 EOS——提前标记会被
+                // "播完即结束"误判，长回答尾部被整批截断（断字断句）。
+                if (active_turn_.load() == 0) {
+                    FireOutputDrained();
+                }
+                break;
             }
             if (!tts_decoder_) {
                 tts_decoder_ = std::make_unique<OpusDecoderWrapper>(24000, 1, 60);
@@ -440,8 +487,8 @@ void DeviceVoiceClient::OpusDecodeLoop() {
                 pcm.empty()) {
                 continue;
             }
-            // 插话/取消后 active_turn 已变，过期输出直接丢弃（不入播放队列）
-            if (frame.turn_id != active_turn_.load()) {
+            // 插话/取消/新轮后不再被接受的轮，过期输出直接丢弃（不入播放队列）
+            if (!IsTurnOutputAlive(frame.turn_id)) {
                 continue;
             }
             OnPcmFn cb;
@@ -453,6 +500,22 @@ void DeviceVoiceClient::OpusDecodeLoop() {
                 cb(frame.turn_id, 0, false, false, pcm.data(), pcm.size());
             }
         }
+    }
+}
+
+void DeviceVoiceClient::FireOutputDrained() {
+    const uint32_t turn_id = finished_turn_.exchange(0);
+    if (turn_id == 0) {
+        return;  // 幂等：没有待排空的轮
+    }
+    ESP_LOGD(TAG, "output drained: turn=%u", (unsigned)turn_id);
+    OnOutputDrainedFn cb;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cb = on_drained_;
+    }
+    if (cb) {
+        cb(turn_id);  // 锁外回调；回调只做 MarkEndOfStream 级别的轻量标记
     }
 }
 
@@ -468,10 +531,44 @@ void DeviceVoiceClient::HandleText(const char* data, size_t len) {
         return;
     }
 
-    // turn.done / turn.cancelled 表示活动轮已结束，清掉活动轮标记。
+    // turn.done：本轮音频已全部下发，活动轮立即失效，但转入 finished_turn_
+    // 等待解码排空——turn.done 时解码队列里往往还压着数秒未解码的尾部
+    // 音频（后端合成远快于实时播放），必须播完，否则"断字断句"。
+    // turn.cancelled（插话/异常）：立即失效并丢弃残余，不排空。
+    // 仅当 turnId 匹配当前活动轮才生效：旧轮迟到的 done/cancelled 绝不能
+    // 误伤新轮（旧实现无条件清零，会把新轮的全部下行音频静默丢掉）。
     if (mt == voice::MessageType::kTurnDone ||
         mt == voice::MessageType::kTurnCancelled) {
-        active_turn_.store(0);
+        const uint32_t done_id = msg.turn_id;
+        const uint32_t cur = active_turn_.load();
+        bool effective = false;
+        if (done_id != 0) {
+            // turnId 严格匹配才生效：旧轮迟到的 done/cancelled 绝不能误伤
+            // 新轮（旧实现无条件清零，会把新轮全部下行音频静默丢掉）。
+            effective = (done_id == cur);
+        } else {
+            // 后端未带 turnId（防御）：退回旧行为，仅当确有活动轮时生效。
+            effective = (cur != 0);
+        }
+        if (effective &&
+            active_turn_.compare_exchange_strong(cur, 0)) {
+            // CAS 防止与 worker 任务的 StartTurn（插话开新轮）竞争：
+            // 抢不到说明活动轮已被新轮接管，本消息按陈旧消息忽略。
+            if (mt == voice::MessageType::kTurnDone) {
+                finished_turn_.store(cur);
+            } else {
+                finished_turn_.store(0);
+            }
+            if (dec_task_ != nullptr) {
+                // 唤醒解码循环尽快评估"排空完成"（dec_task_ 与本回调
+                // 同在 WS 接收任务创建，此处读取无竞争）。
+                xTaskNotifyGive(dec_task_);
+            } else {
+                // 本会话从未有过 opus 帧（纯 PCM 模式/无音频轮）：
+                // 无解码尾部可言，直接宣布排空。
+                FireOutputDrained();
+            }
+        }
     }
 
     OnEventFn cb;

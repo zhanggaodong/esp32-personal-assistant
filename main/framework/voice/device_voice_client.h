@@ -42,6 +42,9 @@ public:
                                        const int16_t* pcm, size_t count)>;
     using OnEventFn = std::function<void(const voice::ServerMessage& msg)>;
     using OnDisconnectedFn = std::function<void(const char* reason)>;
+    // 某轮下行音频已全部解码入播放队列（turn.done 后排空完成）。turn_id 标识
+    // 排空的轮；回调运行在解码任务或 WS 接收任务，只允许做轻量标记。
+    using OnOutputDrainedFn = std::function<void(uint32_t turn_id)>;
 
     static DeviceVoiceClient& Instance();
 
@@ -60,11 +63,12 @@ public:
                    const std::string& voice, const std::string& language,
                    uint32_t max_record_seconds);
 
-    // 停止一轮（松手）：发送 turn.stop。仍接受该轮下行输出直至 turn.done。
+    // 停止一轮（松手）：发送 turn.stop。仍接受该轮下行输出直至 turn.done，
+    // done 后转入"待排空"继续解码播放，直到解码队列排空（OnOutputDrained）。
     bool StopTurn(uint32_t turn_id);
 
     // 取消一轮（插话/网络中断）：发送 turn.cancel，并立即使该轮输出失效
-    // （后续迟到 output_pcm 因 turn_id != ActiveTurnId() 被丢弃）。
+    // （后续该轮迟到输出因 IsTurnOutputAlive 不再放行被丢弃，不排空）。
     bool CancelTurn(uint32_t turn_id, const std::string& reason);
 
     // 发送一帧上行 PCM（16bit 单声道；count 为样本数）。依赖 flags 位标记首/末帧。
@@ -77,6 +81,7 @@ public:
     void SetPcmCallback(OnPcmFn cb);
     void SetEventCallback(OnEventFn cb);
     void SetDisconnectedCallback(OnDisconnectedFn cb);
+    void SetOutputDrainedCallback(OnOutputDrainedFn cb);
 
     // 由控制器任务在收到 kDisconnected 后调用：延迟回收已断开的 WebSocket。
     // 绝不在网络接收回调任务内析构连接对象（那会让接收任务等待自己退出，
@@ -85,6 +90,11 @@ public:
 
     // 当前活动轮 turn id（0 = 无活动轮）。
     uint32_t ActiveTurnId() const { return active_turn_.load(); }
+
+    // 该轮下行输出是否仍应被接受/播放：活动轮，或已收到 turn.done、
+    // 正在等待解码排空的轮（排空语义——turn.done 后队列里的尾部音频
+    // 必须播完，否则长回答尾部被整批丢弃，表现为"断字断句"）。
+    bool IsTurnOutputAlive(uint32_t turn_id) const;
 
 private:
     DeviceVoiceClient() = default;
@@ -108,6 +118,8 @@ private:
     static void OpusDecodeTaskTrampoline(void* arg);
     void OpusDecodeLoop();
     void EnqueueOpusFrame(uint32_t turn_id, const uint8_t* data, size_t len);
+    // 排空完成：原子取走 finished_turn_ 并回调 on_drained_（幂等）。
+    void FireOutputDrained();
 
     std::unique_ptr<WebSocket> ws_;
     mutable std::mutex mutex_;  // 保护 ws_ 与回调字段
@@ -118,6 +130,9 @@ private:
     uint32_t active_connection_generation_ = 0;  // mutex_ 保护：当前建连代次
 
     std::atomic<uint32_t> active_turn_{0};
+    // 已收到 turn.done、正在等待解码排空的轮（0 = 无）。该轮的队列残余
+    // 仍会被解码并播放到排空；新一轮 StartTurn / 取消 / 断线都会清掉它。
+    std::atomic<uint32_t> finished_turn_{0};
     std::atomic<int64_t> last_activity_ms_{0};  // 供 120s 空闲关闭判断
     bool disconnected_notified_ = false;        // mutex_ 保护：同一代次只通知一次
     bool socket_cleanup_pending_ = false;       // mutex_ 保护：待 ReapDisconnectedSocket 回收
@@ -125,6 +140,7 @@ private:
     OnPcmFn on_pcm_;
     OnEventFn on_event_;
     OnDisconnectedFn on_disconnected_;
+    OnOutputDrainedFn on_drained_;
 
     std::mutex dec_mutex_;  // 保护 dec_queue_
     std::deque<PendingOpusFrame> dec_queue_;
