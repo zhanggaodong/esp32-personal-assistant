@@ -540,7 +540,8 @@ void DeviceVoiceClient::HandleText(const char* data, size_t len) {
     if (mt == voice::MessageType::kTurnDone ||
         mt == voice::MessageType::kTurnCancelled) {
         const uint32_t done_id = msg.turn_id;
-        const uint32_t cur = active_turn_.load();
+        // CAS 的 expected 参数是非 const 引用（失败时回写实际值），cur 不能声明为 const
+        uint32_t cur = active_turn_.load();
         bool effective = false;
         if (done_id != 0) {
             // turnId 严格匹配才生效：旧轮迟到的 done/cancelled 绝不能误伤
