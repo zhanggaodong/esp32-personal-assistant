@@ -110,6 +110,7 @@ private:
     std::atomic_bool ptt_held_{false};     // 电源键是否仍按住
     std::atomic_bool speaking_{false};     // 正在播报 TTS（供提示音避让）
     std::atomic_bool conversation_active_{false};  // 一轮对话（录音→播报）进行中（legacy 与 stream 共用）
+    std::atomic_bool legacy_cancel_requested_{false};  // legacy 对话/播报被电源键取消
     std::atomic_bool network_connected_{false};  // 网络回调即时更新，供收尾选择空闲状态
     std::atomic<uint64_t> ptt_press_started_ms_{0};
     std::atomic_bool last_release_was_short_{false};

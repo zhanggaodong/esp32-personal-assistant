@@ -253,7 +253,8 @@ private:
 
 // 解析 opus 流（嗅探已确认 "VO" 头并消费前 2 字节）。EOF 视为正常结束。
 bool DecodeOpusStream(esp_http_client_handle_t client,
-                      const AiClient::OnAudioPcmFn& on_pcm) {
+                      const AiClient::OnAudioPcmFn& on_pcm,
+                      const std::function<bool()>& is_cancelled) {
     HttpByteReader reader(client);
     std::string hdr;
     if (!reader.ReadExactly(4, hdr)) {
@@ -269,6 +270,10 @@ bool DecodeOpusStream(esp_http_client_handle_t client,
     OpusDecoderWrapper decoder(rate, 1, 60);
 
     for (;;) {
+        if (is_cancelled && is_cancelled()) {
+            DeviceLog::Log('I', "AiClient", "TTS 请求已由电源键取消");
+            return false;
+        }
         std::string fh;
         if (!reader.ReadExactly(3, fh)) {
             break;  // EOF：服务器结束响应
@@ -614,7 +619,8 @@ bool AiClient::DoChat(const std::string& text, const OnDeltaFn& on_delta,
     static char buf[2048];
     int n;
     int total = 0;
-    while ((n = esp_http_client_read(client, buf, sizeof(buf))) > 0) {
+    while (!request_cancelled_.load() &&
+           (n = esp_http_client_read(client, buf, sizeof(buf))) > 0) {
         parser.Feed(buf, (size_t)n);
         total += n;
         if (total > 512 * 1024) break;
@@ -622,7 +628,7 @@ bool AiClient::DoChat(const std::string& text, const OnDeltaFn& on_delta,
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    return true;
+    return !request_cancelled_.load();
 }
 
 bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm) {
@@ -707,7 +713,9 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
             got += (size_t)r;
         }
         if (got >= 2 && head[0] == 'V' && head[1] == 'O') {
-            bool ok = DecodeOpusStream(client, on_pcm);
+            bool ok = DecodeOpusStream(client, on_pcm, [this]() {
+                return request_cancelled_.load();
+            });
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             return ok;
@@ -746,11 +754,12 @@ bool AiClient::DoSynthesize(const std::string& text, const OnAudioPcmFn& on_pcm)
     // 仅 headless 工作线程串行调用，用静态缓冲省任务栈（同 DoChat）
     static char buf[2048];
     int n;
-    while ((n = esp_http_client_read(client, buf, sizeof(buf))) > 0) {
+    while (!request_cancelled_.load() &&
+           (n = esp_http_client_read(client, buf, sizeof(buf))) > 0) {
         parser.Feed(buf, (size_t)n);
     }
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    return true;
+    return !request_cancelled_.load();
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -42,6 +43,12 @@ public:
     // 使内存中的 JWT 立即失效（下次访问会重新登录）。
     void InvalidateToken() { access_token_.clear(); }
 
+    // legacy HTTP 语音链路的当前请求取消标记。电源键打断时由按键回调置位，
+    // Chat/TTS 流读取循环在下一块数据处退出；新一轮录音前显式复位。
+    void CancelCurrentRequest() { request_cancelled_.store(true); }
+    void ResetCancellation() { request_cancelled_.store(false); }
+    bool CancellationRequested() const { return request_cancelled_.load(); }
+
     // 语音 WebSocket 地址：把 backend_url 的 http(s) 换成 ws(s)，并拼 /api/voice/device。
     std::string VoiceSocketUrl() const;
 
@@ -74,5 +81,6 @@ private:
     std::string password_;
     std::string voice_;
     std::string access_token_;
+    std::atomic_bool request_cancelled_{false};
     std::mutex login_mutex_;  // 登录并发锁（仅保护 access_token_ 的获取）
 };

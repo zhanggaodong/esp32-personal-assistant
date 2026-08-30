@@ -214,9 +214,18 @@ void HeadlessVoiceController::OnPttPressed() {
         }
         return;
     }
-    // legacy：一轮回答（录音/ASR/Chat/TTS/播报）尚未结束：忽略并短提示
+    // legacy：对话/播报中再次按电源键 = 立即停止，不启动新一轮录音。
+    // 网络请求在下一块流数据处退出；播放队列立即清空，播放线程最多 40ms
+    // 关闭扬声器输出。
     if (conversation_active_.load()) {
-        AudioPromptPlayer::Instance().Play(AudioPromptPlayer::Prompt::kWaitAnswer);
+        legacy_cancel_requested_.store(true);
+        AiClient::Instance().CancelCurrentRequest();
+        if (auto* codec = Board::GetInstance().GetAudioCodec(); codec != nullptr) {
+            codec->EnableOutput(false);
+        }
+        playback_.Clear();
+        ESP_LOGI(TAG, "legacy conversation cancelled by power button");
+        DeviceLog::Log('I', "HeadlessVoice", "legacy: 电源键停止当前回复");
         ptt_held_ = false;
         return;
     }
@@ -349,8 +358,14 @@ void HeadlessVoiceController::HandleEvent(Event e) {
         case State::kStreamingReply:
         case State::kSpeaking:
             if (e == Event::kPress) {
-                // 插话：取消旧轮并立即开始新一轮（由 BeginRecording 内部处理）
-                HandlePressStream();
+                // 回答/播报中单击电源键只停止当前轮，不自动进入下一轮录音。
+                // 下一轮需要松手后再次按住，避免一次按键既停止又误触发录音。
+                ESP_LOGI(TAG, "stream conversation cancelled by power button");
+                DeviceLog::Log('I', "HeadlessVoice", "stream: 电源键停止当前回复");
+                CancelActiveTurn();
+                conversation_active_.store(false);
+                current_turn_id_ = 0;
+                ReturnToIdleState();
             } else if (e == Event::kTurnDone) {
                 // conversationId 已在 OnEvent 中设置；EOS 等解码排空回调
                 // （OnOutputDrained）标记，之后播放队列排空才 kPlaybackEnd
@@ -877,7 +892,7 @@ void HeadlessVoiceController::PlaybackLoop() {
                 starve_count += 1;
                 ESP_LOGW(TAG, "playback underrun: buffered=%u samples",
                          (unsigned)playback_.BufferedSamples());
-                DeviceLog::Log('W', "HeadlessVoice", "stream: 播放缓冲断档(等待音频)");
+                DeviceLog::Log('W', "HeadlessVoice", "播放缓冲断档(等待音频)");
             }
         }
     }
@@ -920,6 +935,8 @@ void HeadlessVoiceController::HandlePressLegacy() {
 
     state_ = State::kRecording;
     conversation_active_.store(true);
+    legacy_cancel_requested_.store(false);
+    AiClient::Instance().ResetCancellation();
     led.ShowRecording();
 
     current_turn_id_ = next_turn_id_++;
@@ -997,6 +1014,9 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
     DiagMark(voice_diag::Stage::kAsr, "asr_request_start");
     std::string question;
     if (!ai.Transcribe(wav, question) || question.empty()) {
+        if (legacy_cancel_requested_.load()) {
+            return;
+        }
         ESP_LOGE(TAG, "asr failed or empty");
         HandleAiFailure();
         return;
@@ -1009,12 +1029,18 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
     std::string conv_id;
     bool first_chat_delta_logged = false;
     bool chat_ok = ai.Chat(question, [&](const char* delta) {
+        if (legacy_cancel_requested_.load()) {
+            return;
+        }
         if (!first_chat_delta_logged) {
             first_chat_delta_logged = true;
             DiagMark(voice_diag::Stage::kChat, "chat_first_delta");
         }
         reply += delta;
     }, conv_id);
+    if (legacy_cancel_requested_.load()) {
+        return;
+    }
     if (!chat_ok || reply.empty()) {
         ESP_LOGE(TAG, "chat failed or empty reply");
         HandleAiFailure();
@@ -1029,19 +1055,32 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
     // 生产者等待（背压），不丢块；EOS 后播放线程排空到空。喂入速率低于实时
     // 时表现为首声稍晚，而不是直写模式那种饥饿断流/缺词。
     playback_.Clear();
-    playback_.set_prebuffer_samples(24000 * 600 / 1000);  // 600ms @24kHz：opus 喂入极快，多攒抗网络停顿
+    playback_.set_prebuffer_samples(24000 * 1500 / 1000);  // 1.5s 预缓冲，吸收分段 TTS/网络短暂停顿
     bool first_tts_pcm = false;
     bool tts_ok = ai.Synthesize(reply, [&](const int16_t* pcm, size_t n) {
+        if (legacy_cancel_requested_.load()) {
+            return;
+        }
         if (!first_tts_pcm) {
             first_tts_pcm = true;
             DiagMark(voice_diag::Stage::kTts, "tts_first_pcm");
         }
-        while (playback_.Push(pcm, n) ==
-               voice::PcmPlaybackQueue::PushResult::kFull) {
+        while (!legacy_cancel_requested_.load() &&
+               playback_.Push(pcm, n) ==
+                   voice::PcmPlaybackQueue::PushResult::kFull) {
             // 队列满：等播放线程消化（背压），绝不丢音频块
             vTaskDelay(pdMS_TO_TICKS(20));
         }
+        if (legacy_cancel_requested_.load()) {
+            // 取消可能发生在队列满等待期间；再次清空，避免竞争窗口里刚入队
+            // 的最后一块音频让扬声器重新启动。
+            playback_.Clear();
+        }
     });
+    if (legacy_cancel_requested_.load()) {
+        playback_.Clear();
+        return;
+    }
     if (!tts_ok || !first_tts_pcm) {
         // 中途失败：用 EOS 让播放线程排空残留并自行关输出/清 speaking_
         // （直接 Clear 会留下"输出已开但永远等不到数据"的悬挂状态），
@@ -1059,8 +1098,13 @@ void HeadlessVoiceController::ProcessConversation(const std::vector<int16_t>& mi
     playback_.MarkEndOfStream();
     // 等播放线程把缓冲排空（含预缓冲与尾音），超时兜底防卡死
     const int64_t drain_deadline = NowMs() + 90000;
-    while (!playback_.EndReached() && NowMs() < drain_deadline) {
+    while (!legacy_cancel_requested_.load() &&
+           !playback_.EndReached() && NowMs() < drain_deadline) {
         vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (legacy_cancel_requested_.load()) {
+        playback_.Clear();
+        return;
     }
     if (!playback_.EndReached()) {
         ESP_LOGW(TAG, "playback drain timeout, force stop");

@@ -10,7 +10,7 @@
 // 独立 PlaybackTask 出队并调用 codec->OutputData()。
 //
 // 规则：
-//   - 固定容量：最大缓存 2 秒（24kHz/16bit/单声道 = 48000 采样）；
+//   - 固定容量：最大缓存 5 秒（24kHz/16bit/单声道 = 120000 采样）；
 //     达到上限时 Push 返回 kFull，网络读取侧施加背压，不扩容。
 //   - 预缓冲只在开播前生效：未开播时攒满 kPrebufferSamples 才允许第一次
 //     出队；开播后按需出队、有多少播多少，EOS 后排空到空（否则尾音
@@ -24,7 +24,7 @@ namespace voice {
 class PcmPlaybackQueue {
 public:
     static constexpr size_t kSampleRate = 24000;
-    static constexpr size_t kMaxSamples = kSampleRate * 2;        // 2 秒
+    static constexpr size_t kMaxSamples = kSampleRate * 5;        // 5 秒
     static constexpr size_t kPrebufferMs = 120;                    // 120ms 预缓冲
     static constexpr size_t kPrebufferSamples =
         kSampleRate * kPrebufferMs / 1000;  // 2880
