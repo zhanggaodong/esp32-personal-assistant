@@ -59,9 +59,14 @@ public:
     bool EnsureConnected();
 
     // 开始一轮：发送 turn.start，并把 turn_id 记为当前活动轮。
+    // enabled_caps：本轮允许的能力类别（逗号分隔，如 "search,schedule"；空串=全关），
+    //   随 turn.start 下发给后端以裁剪工具集。
+    // history_limit：本轮携带的历史消息条数。
     bool StartTurn(uint32_t turn_id, const std::string& conversation_id,
                    const std::string& voice, const std::string& language,
-                   uint32_t max_record_seconds);
+                   uint32_t max_record_seconds,
+                   const std::string& enabled_caps,
+                   uint32_t history_limit);
 
     // 停止一轮（松手）：发送 turn.stop。仍接受该轮下行输出直至 turn.done，
     // done 后转入"待排空"继续解码播放，直到解码队列排空（OnOutputDrained）。

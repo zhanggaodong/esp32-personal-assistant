@@ -64,6 +64,32 @@ int64_t NowMs() {
     return esp_timer_get_time() / 1000;
 }
 
+// 本轮允许下发给后端的 AI 能力类别（逗号分隔）。
+//
+// 只有"开启"的类别会被后端注册成工具：关掉的类别其工具定义不进 prompt，
+// system prompt 里对应的调用指令也会一并省略，prefill 更快。
+// 全部关闭时返回空串 —— 后端据此区分"老设备（字段缺失=全开）"与"主动全关"。
+std::string BuildEnabledCaps() {
+    static const struct { const char* key; const char* cap; } kCaps[] = {
+        {"ai.cap_search", "search"},
+        {"ai.cap_schedule", "schedule"},
+        {"ai.cap_todo", "todo"},
+        {"ai.cap_memo", "memo"},
+        {"ai.cap_accounting", "accounting"},
+    };
+    std::string caps;
+    for (const auto& item : kCaps) {
+        if (ConfigStore::Instance().Get(item.key) == "0") {
+            continue;
+        }
+        if (!caps.empty()) {
+            caps += ",";
+        }
+        caps += item.cap;
+    }
+    return caps;
+}
+
 // 线性重采样（only legacy）：src(采样率 src_rate) -> out(dst_rate)。
 void Resample(const std::vector<int16_t>& src, int src_rate, int dst_rate,
               std::vector<int16_t>& out) {
@@ -496,7 +522,12 @@ void HeadlessVoiceController::BeginRecording() {
     int max_rec = ConfigStore::Instance().GetInt("ai.max_record_seconds", 30);
     max_rec = std::max(15, std::min(60, max_rec));  // 固件硬上限 60s
 
-    if (!vc.StartTurn(current_turn_id_, conv, voice, "zh-CN", (uint32_t)max_rec)) {
+    const std::string caps = BuildEnabledCaps();
+    int history_limit = ConfigStore::Instance().GetInt("ai.history_limit", 20);
+    history_limit = std::max(0, std::min(50, history_limit));
+
+    if (!vc.StartTurn(current_turn_id_, conv, voice, "zh-CN", (uint32_t)max_rec,
+                      caps, (uint32_t)history_limit)) {
         ESP_LOGE(TAG, "turn.start failed");
         DeviceLog::Log('E', "HeadlessVoice", "stream: turn.start 发送失败");
         led.ShowError();

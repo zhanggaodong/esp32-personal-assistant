@@ -120,7 +120,9 @@ static void AddU32(cJSON* obj, const char* key, uint32_t v) {
 
 std::string BuildTurnStart(uint32_t turn_id, const std::string& conversation_id,
                            const std::string& voice, const std::string& language,
-                           uint32_t max_record_seconds) {
+                           uint32_t max_record_seconds,
+                           const std::string& enabled_caps,
+                           uint32_t history_limit) {
     cJSON* root = cJSON_CreateObject();
     if (root == nullptr) {
         return {};
@@ -137,6 +139,9 @@ std::string BuildTurnStart(uint32_t turn_id, const std::string& conversation_id,
     AddU32(root, "maxRecordSeconds", max_record_seconds);
     // 请求下行 opus（60ms/24kHz/单声道）。旧后端会忽略未知字段并回退 PCM 帧。
     cJSON_AddStringToObject(root, "audioCodec", "opus");
+    // 本轮允许的能力类别（空串 = 全关）。旧后端忽略该字段 → 全量注册工具。
+    cJSON_AddStringToObject(root, "enabledCaps", enabled_caps.c_str());
+    AddU32(root, "historyLimit", history_limit);
 
     char* s = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

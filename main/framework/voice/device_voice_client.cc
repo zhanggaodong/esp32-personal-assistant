@@ -281,10 +281,12 @@ bool DeviceVoiceClient::StartTurn(uint32_t turn_id,
                                   const std::string& conversation_id,
                                   const std::string& voice,
                                   const std::string& language,
-                                  uint32_t max_record_seconds) {
+                                  uint32_t max_record_seconds,
+                                  const std::string& enabled_caps,
+                                  uint32_t history_limit) {
     const std::string msg =
         voice::BuildTurnStart(turn_id, conversation_id, voice, language,
-                              max_record_seconds);
+                              max_record_seconds, enabled_caps, history_limit);
     if (msg.empty()) {
         return false;
     }

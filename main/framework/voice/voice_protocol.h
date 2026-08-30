@@ -78,11 +78,21 @@ bool EncodeBinaryFrame(FrameType type, uint8_t flags, uint32_t turn_id,
 // 控制消息 JSON 构造（设备 -> 后端）
 // ---------------------------------------------------------------------------
 
-// {type:"turn.start", turnId, conversationId|null, voice, language, maxRecordSeconds}
+// {type:"turn.start", turnId, conversationId|null, voice, language,
+//  maxRecordSeconds, audioCodec, enabledCaps, historyLimit}
 // conversation_id 为空时序列化为 null。
+//
+// enabled_caps 为本轮允许的 AI 能力类别（逗号分隔，如 "search,schedule"），
+// 全关时传空串 —— 后端据此只注册对应工具，prompt 更短、prefill 更快。
+// history_limit 为本轮携带的历史消息条数。
+//
+// 兼容性：老后端不认识 enabledCaps / historyLimit，会忽略这两个字段并全量注册
+// 工具，因此"字段缺失"与"全开"等价，天然向后兼容。
 std::string BuildTurnStart(uint32_t turn_id, const std::string& conversation_id,
                            const std::string& voice, const std::string& language,
-                           uint32_t max_record_seconds);
+                           uint32_t max_record_seconds,
+                           const std::string& enabled_caps,
+                           uint32_t history_limit);
 
 // {type:"turn.stop", turnId}
 std::string BuildTurnStop(uint32_t turn_id);

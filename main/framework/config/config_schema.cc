@@ -21,6 +21,19 @@ const ConfigItem kConfigSchema[] = {
      "15|30|60", "AI服务"},
     {"ai.voice_protocol", "语音协议", ConfigType::kEnum, "legacy",
      "legacy|stream_v1", "AI服务"},
+    // 携带的历史消息条数：越少 → prompt 越短 → prefill 越快，但模型记不住
+    // 更早的对话。用枚举而不是自由输入，避免填出离谱值。
+    {"ai.history_limit", "携带历史消息条数", ConfigType::kEnum, "20",
+     "0|5|10|20", "AI服务"},
+
+    // 分组：AI 能力 —— 关闭的类别不会注册对应工具，prompt 更短、prefill 更快。
+    // 由 turn.start 的 enabledCaps 字段下传给后端（见 voice_protocol.cc）。
+    // 网页端改动即时生效（kEventConfigChanged），不需要重启。
+    {"ai.cap_search", "联网搜索", ConfigType::kBool, "1", nullptr, "AI能力"},
+    {"ai.cap_schedule", "日程与提醒", ConfigType::kBool, "1", nullptr, "AI能力"},
+    {"ai.cap_todo", "待办", ConfigType::kBool, "1", nullptr, "AI能力"},
+    {"ai.cap_memo", "事件备忘", ConfigType::kBool, "1", nullptr, "AI能力"},
+    {"ai.cap_accounting", "记账", ConfigType::kBool, "1", nullptr, "AI能力"},
 };
 
 #else  // 屏幕版（Framework / 原始小智回退构建）
