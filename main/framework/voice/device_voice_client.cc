@@ -1,5 +1,6 @@
 #include "voice/device_voice_client.h"
 
+#include <cstdio>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <web_socket.h>
@@ -373,7 +374,43 @@ void DeviceVoiceClient::HandleBinary(const char* data, size_t len) {
         voice::DecodeBinaryFrame(reinterpret_cast<const uint8_t*>(data), len,
                                  frame);
     if (rc != voice::FrameParseResult::kOk) {
-        ESP_LOGW(TAG, "bad binary frame rc=%d, closing", static_cast<int>(rc));
+        // 断线原因必须能在网页日志里直接看到（不必接串口）：把 rc 翻译成
+        // 可读含义，连同帧长度与头部前 8 字节一起打印。
+        //   出现 not_enough 且 len 偏小 → 底层把一个 WebSocket 帧拆成了
+        //   多次回调，本函数又没有做分片重组（需要按 payload 累积后再解析）。
+        //   出现 bad_magic/bad_type → 帧边界错位或收到了非协议数据。
+        const char* rc_name = "ok";
+        switch (rc) {
+            case voice::FrameParseResult::kNotEnough:
+                rc_name = "not_enough";
+                break;
+            case voice::FrameParseResult::kBadMagic:
+                rc_name = "bad_magic";
+                break;
+            case voice::FrameParseResult::kBadType:
+                rc_name = "bad_type";
+                break;
+            case voice::FrameParseResult::kPayloadTooLarge:
+                rc_name = "payload_too_large";
+                break;
+            case voice::FrameParseResult::kBadAlignment:
+                rc_name = "bad_alignment";
+                break;
+            default:
+                rc_name = "unknown";
+                break;
+        }
+        char head_hex[32] = {0};
+        const size_t dump = len < 8 ? len : 8;
+        for (size_t i = 0; i < dump; ++i) {
+            snprintf(head_hex + i * 3, 4, "%02X ",
+                     static_cast<unsigned>(static_cast<uint8_t>(data[i])));
+        }
+        ESP_LOGW(TAG, "bad binary frame rc=%d(%s) len=%u head=%s, closing",
+                 static_cast<int>(rc), rc_name, (unsigned)len, head_hex);
+        DeviceLog::Log('E', "VoiceClient",
+                       "ws 二进制帧解析失败: rc=%s len=%u head=%s (将断开)",
+                       rc_name, (unsigned)len, head_hex);
         // 接收任务上下文：只标记断线，对象延后由控制器任务回收。
         HandleSocketDisconnected(connection_generation_.load(), "bad_frame");
         return;
