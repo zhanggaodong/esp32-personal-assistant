@@ -44,6 +44,13 @@ constexpr size_t kStreamPrebufferMs = 600;
 // 等待 turn.done 的看门狗上限（超过则强制结束本轮）
 constexpr uint64_t kTurnDeadlineMs = 120000;
 
+// 收到 turn.progress 心跳后的看门狗超时。后端下发音频期间每 5s 发一次心跳
+// （VOICE_TURN_PROGRESS_INTERVAL_MS），这里容许连续丢失 3 次再判死。
+//
+// 这样超长回复不再受"按下 PTT 起 120s"的墙钟约束 —— 只要后端还在正常下发，
+// 看门狗就一直续期；而后端一旦卡住，20s 内就能发现，比原来干等 120s 灵敏得多。
+constexpr uint64_t kTurnProgressTimeoutMs = 20000;
+
 // turn.error 展示给网页日志的 message 上限（UTF-8 字节），防止异常响应撑爆日志。
 constexpr size_t kMaxTurnErrorMessageBytes = 160;
 
@@ -325,8 +332,10 @@ void HeadlessVoiceController::WorkerLoop() {
         if (xQueueReceive(event_queue_, &e, wait) != pdTRUE) {
             if (in_wait_state && NowMs() >= (int64_t)turn_deadline_ms_) {
                 ESP_LOGE(TAG, "turn timeout waiting turn.done, forcing end");
+                // 不要写死秒数：等待中的超时可能是初始看门狗(120s)，
+                // 也可能是收到过心跳后的心跳超时(20s)，写死会误导排查。
                 DeviceLog::Log('E', "HeadlessVoice",
-                               "stream: 等待 turn.done 超时(120s)，强制结束本轮");
+                               "stream: 等待 turn.done 超时，强制结束本轮");
                 CancelActiveTurn();
                 HandleTurnEnd(false);
             }
@@ -759,6 +768,15 @@ void HeadlessVoiceController::OnEvent(const voice::ServerMessage& msg) {
             }
             ESP_LOGD(TAG, "chat delta: %.*s", (int)std::min<size_t>(msg.text.size(), 200),
                      msg.text.c_str());
+            break;
+        }
+        case voice::MessageType::kTurnProgress: {
+            // 后端还在正常下发音频：把看门狗续期到"心跳超时"。
+            // 严格匹配 turnId —— 旧轮迟到的心跳绝不能给新轮续期，
+            // 否则新轮真卡死时会被旧心跳一直吊着，永远检测不到。
+            if (msg.has_turn_id && msg.turn_id == current_turn_id_) {
+                turn_deadline_ms_ = NowMs() + kTurnProgressTimeoutMs;
+            }
             break;
         }
         case voice::MessageType::kTurnDone:

@@ -213,6 +213,7 @@ MessageType ClassifyMessage(const char* json, size_t len) {
     if (type == "turn.done") return MessageType::kTurnDone;
     if (type == "turn.cancelled") return MessageType::kTurnCancelled;
     if (type == "turn.error") return MessageType::kTurnError;
+    if (type == "turn.progress") return MessageType::kTurnProgress;
     return MessageType::kUnknown;
 }
 

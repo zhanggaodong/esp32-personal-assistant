@@ -106,6 +106,7 @@ enum class MessageType {
     kTurnDone,      // 本轮结束，携带 conversationId 与统计
     kTurnCancelled, // 后端已停止旧轮
     kTurnError,     // 阶段、错误码、可展示信息
+    kTurnProgress,  // 音频下发期间的心跳：收到即续期本轮看门狗
 };
 
 // 根据 JSON 顶层 "type" 归类。解析失败返回 kUnknown。

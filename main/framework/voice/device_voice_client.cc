@@ -181,9 +181,14 @@ bool DeviceVoiceClient::DoConnect() {
         }
         last_activity_ms_.store(NowMs());
     });
+    // 注意 reason 的命名：这个回调在"底层传输检测到连接已断"时触发，与断连的
+    // 发起方无关 —— 服务端主动关、反代超时、本地 TCP 出错、接收缓冲异常都会走到
+    // 这里。叫 server_closed 会让人误以为是服务端主动 close，从而在排查时错误地
+    // 排除设备侧原因。真实的断连方向要看后端 close 事件的 code：
+    // 1006=传输层异常中断；1000/1001=对端正常 close。
     ws->OnDisconnected([this, generation]() {
         xEventGroupSetBits(hello_evt_, kHelloFailBit);
-        HandleSocketDisconnected(generation, "server_closed");
+        HandleSocketDisconnected(generation, "transport_closed");
     });
 
     {
